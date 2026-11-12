@@ -215,9 +215,15 @@ jobs:
         # flutter_tester 收尾偶发崩溃（用例全绿却 exit 1，三平台都遇到过；
         # v3.7.1 Windows 连续两次 591 全绿仍 exit 1 即此症状）：
         # 至多重试一次，重试后仍挂才让门禁红。**禁止**改成 `|| true`。
+        #
+        # ⚠️ macOS 必须 `-j 1` 串行（与 Windows 同步）：
+        # 实测 v3.10.0 在 macos runner（多核）上默认并行跑，两次都在收尾
+        # `TestDeviceException(Shell subprocess crashed with segmentation fault)`，
+        # 且每次"全绿"的用例数还不一样（615 / 618）——典型的并发收尾崩溃，
+        # 不是用例失败。串行后稳定。
         shell: bash
         run: |
-          flutter test || flutter test
+          flutter test -j 1 || flutter test -j 1
 
       - name: 启用 macOS 桌面支持
         run: flutter config --enable-macos-desktop
