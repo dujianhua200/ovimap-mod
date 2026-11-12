@@ -7,6 +7,7 @@ import '../geo/geo_util.dart';
 import '../models/label_type.dart';
 import '../models/map_label.dart';
 import '../services/store.dart';
+import '../symbols/dxf_block_parser.dart';
 import 'basemap.dart';
 import 'dxf_layers.dart';
 import 'dxf_validate.dart';
@@ -143,6 +144,21 @@ class DxfExporter {
     final h = _H();
     final c = _Ctx(sb, version, h);
 
+    // 本次导出要用到的图例库块。
+    //
+    // ⚠️ 必须在写 BLOCKS 段**之前**算好：DXF 的段序是
+    // HEADER→TABLES→BLOCKS→ENTITIES，而块定义只能写在 BLOCKS 里，
+    // 所以不能"边写 INSERT 边登记"。这里从 labels 的类型直接推
+    // （符号循环与图例栏都只由 labels 决定，口径一致）。
+    final usedCatalogBlocks = <String>{
+      for (final l in labels)
+        if (l.type.isBlock &&
+            l.typeId != 'track' &&
+            l.typeId != 'none' &&
+            l.typeId != 'text')
+          l.typeId,
+    };
+
     // DXF 头：声明 GBK 代码页（两版本一致），AutoCAD 中文版按此读取文字不乱码。
     // R2000 需完整 HEADER+`$HANDSEED`+范围变量；`$HANDSEED` 与图幅范围用占位符，
     // 待实体写完后回填（句柄分配器此刻才知道最终值）。
@@ -169,7 +185,7 @@ class DxfExporter {
     _appendTables(c, version, completionRed);
 
     // 符号块定义：INSERT 引用，CAD 中可整体移动/复制/编辑（对齐图例）。
-    _appendBlocksSection(c, version);
+    _appendBlocksSection(c, version, usedCatalogBlocks);
 
     // 实体段
     sb.write('0\nSECTION\n2\nENTITIES\n');
@@ -381,6 +397,34 @@ class DxfExporter {
           block = 'HZ_TRI';
         } else {
           block = 'HZ_POLE';
+        }
+        // 图例库符号（lispblock.dxf 里的真图块）：直接 INSERT 同名块，
+        // 几何与用户 CAD 图例一致，不再用"椭圆/矩形/三角"近似。
+        // 块定义在 _appendBlocksSection 里按需写出（只写用到的，不塞整份图例）。
+        if (lt.isBlock) {
+          final b = lt.block!;
+          usedCatalogBlocks.add(lt.id);
+          // 图例块自身单位是"纸面毫米 @1:1"，与预置符号同口径 → 同一个 symScale。
+          // 对齐靠块定义的基点（_blockBaseOf），插入点即地图点。
+          _appendInsert(c, 'BiaoQian', lt.id, x, y, sx: symScale, sy: symScale);
+          // 名称：图块本体只含图例里那一个代号字（如 gl004 里的"木"），
+          // 出图时还必须能看出"哪一根 / 什么规格"——名称照样写在符号上方。
+          if (disp.isNotEmpty) {
+            final top = (b.maxY - _blockBaseY(b)) * symScale;
+            _text(c, 'BiaoQian', x, y + top + _mmOf(1.2, routeScale),
+                labelFontM, disp, style: true);
+          }
+          if (l.holes > 0) {
+            _appendHoleDots(c, x, y + holeDotsUpM, l);
+            _text(c, 'BiaoQian', x, y - offDownM, noteFontM,
+                '${l.holes}孔${l.usedHoles > 0 ? '用${l.usedHoles}' : ''}',
+                style: true);
+          }
+          if (l.note.trim().isNotEmpty) {
+            _text(c, 'BiaoQian', x, y - offNoteM, noteFontM, l.note.trim(),
+                style: true);
+          }
+          continue;
         }
         // 箱体/人孔（box/oval）：**矩形框随文字自适应、文字在框内**——
         // 对照真实通信图纸（分纤盒/接头盒画法）：框宽=文字宽+2mm 边距，
@@ -712,16 +756,17 @@ class DxfExporter {
     final lx = minX - m + 4;
     _text(c, 'TuQian', lx, y + 6, 3, '图  例');
     for (final t in ordered) {
-      String block;
-      if (t.isOval) {
-        block = 'HZ_OVAL';
-      } else if (t.isBox) {
-        block = 'HZ_BOX';
-      } else if (t.isTri) {
-        block = 'HZ_TRI';
-      } else {
-        block = 'HZ_POLE';
-      }
+      // 图例库符号：直接插真图块（与图上符号同一份几何）；预置符号仍用
+      // 形状近似块。图例栏是 1:1 纸面毫米，所以这里 sx=sy=1。
+      final block = t.isBlock
+          ? t.id
+          : (t.isOval
+              ? 'HZ_OVAL'
+              : t.isBox
+                  ? 'HZ_BOX'
+                  : t.isTri
+                      ? 'HZ_TRI'
+                      : 'HZ_POLE');
       _appendInsert(c, 'TuQian', block, lx + 2, y);
       _text(c, 'TuQian', lx + 5, y - 1, 2.5, t.name);
       y -= 6;
@@ -883,8 +928,13 @@ class DxfExporter {
     _appendLine(c, layer, px, py, ax, ay);
   }
 
-  /// 符号块定义段：人孔椭圆 / 箱体 / 引上三角 / 杆路圆叉。
-  static void _appendBlocksSection(_Ctx c, DxfVersion version) {
+  /// 符号块定义段：人孔椭圆 / 箱体 / 引上三角 / 杆路圆叉 + **图例库块**。
+  ///
+  /// [catalogBlocks] 是本次导出真正用到的图例块编号（`gl001` …），
+  /// 只有它们会被写成 BLOCK——整份图例有 89 个块，全塞进去会让每个 DXF
+  /// 平白多出近两万行无用块定义。
+  static void _appendBlocksSection(
+      _Ctx c, DxfVersion version, Set<String> catalogBlocks) {
     c.sb.write('0\nSECTION\n2\nBLOCKS\n');
     // R2000 需 *Model_Space 块（实体属主 330=1F 指向它，句柄固定为 1F）。
     if (version == DxfVersion.r2000) {
@@ -916,17 +966,95 @@ class DxfExporter {
     _appendLine(bc, '0', -1.2, 0, 1.2, 0);
     _appendLine(bc, '0', 0, -1.2, 0, 1.2);
     _appendBlock(c, version, 'HZ_POLE', b.toString());
+
+    // ---- 图例库块（lispblock.dxf）：按需写出，几何直接用归一化结果 ----
+    //
+    // 块名 = 图块编号（gl001 / gx005_x…），与用户 CAD 图例里的块名一致，
+    // 这样图纸拿到 CAD 里 explode / 再插块都还是原来那套符号体系。
+    _appendCatalogBlocks(c, version, catalogBlocks);
+
     c.sb.write('0\nENDSEC\n');
+  }
+
+  /// 把用到的图例库块写成 BLOCK 定义。
+  ///
+  /// 关键点：
+  /// 1. **基点 = 块几何中心**（组码 10/20）。图例库的块大多以 0,0 为对称中心，
+  ///    但拉线（`lx001` 在 x=0..10）不是；统一按几何中心设基点，INSERT 到地图点
+  ///    时符号自然居中，不需要每处再算偏移。
+  /// 2. 几何先**平移到基点坐标系**再写：块定义里写 `原坐标 - 中心`。
+  /// 3. 只用 R12 也认识的实体（LINE/CIRCLE/ARC/POLYLINE/TEXT）——归一化器
+  ///    已经把 LWPOLYLINE/HATCH/SPLINE/ELLIPSE 降维过了。
+  static void _appendCatalogBlocks(
+      _Ctx c, DxfVersion version, Set<String> ids) {
+    if (ids.isEmpty) return;
+    final sorted = ids.toList()..sort();
+    for (final id in sorted) {
+      final lt = LabelType.fromId(id);
+      final block = lt.block;
+      if (block == null || block.isEmpty) continue;
+      final bx = _blockBaseX(block);
+      final by = _blockBaseY(block);
+      final b = StringBuffer();
+      final bc = _Ctx(b, version, c.h);
+      for (final s in block.strokes) {
+        _appendSymbolStroke(bc, s, bx, by);
+      }
+      _appendBlockAt(c, version, id, b.toString(), bx, by);
+    }
+  }
+
+  /// 图例块的基点 X：几何中心。
+  static double _blockBaseX(DxfBlock b) => (b.minX + b.maxX) / 2;
+  static double _blockBaseY(DxfBlock b) => (b.minY + b.maxY) / 2;
+
+  /// 把一条归一化图元写成 DXF 实体（相对 blockBase 平移）。
+  static void _appendSymbolStroke(
+      _Ctx c, SymbolStroke s, double bx, double by) {
+    switch (s) {
+      case SymbolLine():
+        _appendLine(c, '0', s.x1 - bx, s.y1 - by, s.x2 - bx, s.y2 - by);
+      case SymbolCircle():
+        c.ent('CIRCLE', '0', 'AcDbCircle');
+        c.sb.write('10\n${_fmt(s.cx - bx)}\n20\n${_fmt(s.cy - by)}\n30\n0\n'
+            '40\n${_fmt(s.r)}\n');
+      case SymbolArc():
+        c.ent('ARC', '0', 'AcDbArc');
+        c.sb.write('10\n${_fmt(s.cx - bx)}\n20\n${_fmt(s.cy - by)}\n30\n0\n'
+            '40\n${_fmt(s.r)}\n'
+            '50\n${s.a0.toStringAsFixed(3)}\n'
+            '51\n${s.a1.toStringAsFixed(3)}\n');
+      case SymbolPoly():
+        if (s.pts.length < 2) return;
+        final pts = [
+          for (final p in s.pts) [p[0] - bx, p[1] - by]
+        ];
+        _appendPolyline(c, '0', pts, closed: s.closed);
+      case SymbolText():
+        _text(c, '0', s.x - bx, s.y - by, s.h, s.text,
+            angle: s.angle == 0 ? null : s.angle, style: true);
+      default:
+        // 其余（含解析器内部的 _InsertRef）在归一化阶段已消费，不会到这里。
+        break;
+    }
   }
 
   static void _appendBlock(
       _Ctx c, DxfVersion version, String name, String body) {
+    _appendBlockAt(c, version, name, body, 0, 0);
+  }
+
+  /// 写 BLOCK…ENDBLK，允许指定基点（图例库块按几何中心设基点）。
+  static void _appendBlockAt(_Ctx c, DxfVersion version, String name,
+      String body, double baseX, double baseY) {
+    final bx = _fmt(baseX), by = _fmt(baseY);
     if (version == DxfVersion.r2000) {
       c.sb.write('0\nBLOCK\n5\n${c.h.next()}\n330\n0\n100\nAcDbEntity\n8\n0\n'
           '100\nAcDbBlockBegin\n2\n$name\n70\n0\n'
-          '10\n0.000\n20\n0.000\n30\n0.000\n3\n$name\n1\n\n');
+          '10\n$bx\n20\n$by\n30\n0.000\n3\n$name\n1\n\n');
     } else {
-      c.sb.write('0\nBLOCK\n8\n0\n2\n$name\n70\n0\n10\n0\n20\n0\n30\n0\n3\n$name\n');
+      c.sb.write('0\nBLOCK\n8\n0\n2\n$name\n70\n0\n'
+          '10\n$bx\n20\n$by\n30\n0\n3\n$name\n');
     }
     c.sb.write(body);
     if (version == DxfVersion.r2000) {
@@ -937,6 +1065,11 @@ class DxfExporter {
     }
   }
 
+  /// 写一个 INSERT（预置符号块用）。
+  ///
+  /// 图例库块不走这里：它们的几何中心未必在 (0,0)（如拉线块整体在 x=0..10
+  /// 一侧），对齐靠 **BLOCK 定义里的基点**（组码 10/20），不是靠 INSERT 偏移
+  /// ——INSERT 的 11/21 是"属性对齐点"，不是几何平移，用了只会让块跑位。
   static void _appendInsert(
       _Ctx c, String layer, String name, double x, double y,
       {double sx = 1, double sy = 1}) {

@@ -43,3 +43,9 @@ dependency_overrides:
 
 flutter:
   uses-material-design: true
+
+  assets:
+    # 图例库：用户的 AutoCAD 图例图纸（图块定义 + 版式文字）。
+    # 导出 DXF 时直接 INSERT 这里的图块，符号几何与用户的 CAD 图例一致。
+    # 替换图例 = 换这个文件，不用改代码。
+    - assets/dxf/lispblock.dxf
