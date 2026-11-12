@@ -20,6 +20,8 @@ import 'package:ovimap/services/store.dart';
 import 'package:ovimap/symbols/dxf_block_parser.dart';
 import 'package:ovimap/symbols/symbol_catalog.dart';
 
+import '_fs_cleanup.dart';
+
 /// 真实图例库文件（仓库内随包资源）。
 File _asset() => File('assets/dxf/lispblock.dxf');
 
@@ -426,9 +428,10 @@ EOF
 
     tearDown(() {
       AppPaths.clearForTest();
-      try {
-        tmp.deleteSync(recursive: true);
-      } catch (_) {}
+      // Windows 上落盘句柄可能尚未释放，直接 deleteSync 会抛
+      // PathAccessException(errno=32) 把全绿用例判红；
+      // 交给弹性删除（重试若干次，仍失败只告警）。
+      deleteTempDirResilient(tmp);
     });
 
     test('R12：写出块定义 + INSERT 真块，且结构校验通过', () async {

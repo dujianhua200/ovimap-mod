@@ -41,28 +41,30 @@ fi
 echo "共 ${#FILES[@]} 个测试文件，逐个独立进程运行"
 echo "=================================================="
 
-# 判定"是否为 flutter_tester 收尾崩溃"（而不是真实的用例失败）。
+# 判定"是否为收尾阶段的非断言失败"（而不是真实的用例失败）。
 #
-# 为什么不能只看 `All tests passed!`：
-#   只有 1 个 test 的文件（如 lispblock_ezdxf_strict_test.dart）输出是
-#   "🎉 0 tests passed."（统计口径是"套件数-1"），但那个 ✅ 用例其实**已通过**，
-#   进程是在收尾阶段 segfault。用 'All tests passed!' 当判据会漏掉这类文件，
-#   于是重试不触发、门禁被误判为红。
+# 两类已知噪声，都会让**全绿**的用例被判红：
+#   A. flutter_tester 收尾 segfault（三平台都见过）
+#      → 输出只有 ✅ 与 TestDeviceException，最后是 "0 tests passed"（套件数-1 口径）
+#   B. Windows 收尾删临时目录失败（文件句柄未释放）
+#      → `PathAccessException: ... errno = 32`，用例名后挂 (failed)，
+#        但同一行上方所有 ✅ 用例都是通过的，且**没有 [E] 断言失败**
 #
-# 判据必须**同时**满足以下三条（放行 = 认定用例真的全过了）：
-#   ① 有进程级崩溃标记：TestDeviceException / segmentation fault / crashed；
-#   ② 有 ✅ 通过标记（至少一个用例真的跑过并通过）；
-#   ③ **没有**任何真实失败标记：[E]、Some tests failed、Failing tests。
-# ③ 是安全底线：只要出现任一失败标记就绝不放行。
+# 判据必须**同时**满足三条（放行 = 认定用例真的全过了）：
+#   ① 有已知噪声标记（上面 A 或 B 之一）；
+#   ② 有通过标记（Passing tests / All tests passed / tests passed）；
+#   ③ **没有任何**真实失败标记：`[E]`、`Some tests failed`、`Failing tests:`。
+# ③ 是安全底线：真实断言失败一定带 `[E]`（dart_test 的固定格式），
+# 只要出现就绝不放行 —— 宁可误判为失败，也绝不放过真错。
 is_finalize_crash() {
   local o="$1"
-  # ① 进程级崩溃
-  echo "$o" | grep -qiE 'TestDeviceException|segmentation fault|Shell subprocess crashed' || return 1
-  # ③ 先排除真实失败（宁可误判为失败，也不放过真错）
+  # ① 已知噪声（A 收尾崩溃 / B Windows 文件锁）
+  echo "$o" | grep -qiE 'TestDeviceException|segmentation fault|Shell subprocess crashed|PathAccessException|errno = 32' || return 1
+  # ③ 真实失败优先排除
   if echo "$o" | grep -qE '\[E\]|Some tests failed|Failing tests:'; then
     return 1
   fi
-  # ② 至少有一个用例通过（用 ASCII 标记，避免 ✅/中文在多字节编码下 grep 失配）
+  # ② 至少有一个用例真的跑过并通过
   echo "$o" | grep -q 'Passing tests\|All tests passed\|tests passed' || return 1
   return 0
 }

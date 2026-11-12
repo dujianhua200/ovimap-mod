@@ -7,6 +7,8 @@ import 'package:ovimap/models/map_label.dart';
 import 'package:ovimap/state/app_state.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 
+import '_fs_cleanup.dart';
+
 class _FakePathProvider extends PathProviderPlatform {
   final String root;
   _FakePathProvider(this.root);
@@ -77,7 +79,9 @@ void main() {
     expect(st.labels[1].slackM, 0);
     expect(st.labels[1].name, 'GK-2');
 
-    dir.deleteSync(recursive: true);
+    // Windows 上落盘句柄可能尚未释放：用弹性删除（重试若干次，仍失败只告警），
+    // 否则会抛 PathAccessException(errno=32) 把一条全绿的用例判成失败。
+    await deleteTempDirResilient(dir);
   }, timeout: const Timeout(Duration(minutes: 2)));
 
   test('applyBatch：未选点返回 0，不改动', () {
