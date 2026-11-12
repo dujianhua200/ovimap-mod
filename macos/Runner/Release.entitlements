@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- 地图瓦片 / 天地图检索 / 云同步均走 HTTPS，沙箱下必须显式放行出网，
+	     否则 release 版界面能起来但底图与全部在线能力空白。 -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!-- 导入 GeoJSON 底图、另存为导出产物、选择取证图片，均依赖用户主动选中的文件。 -->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+</dict>
+</plist>

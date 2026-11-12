@@ -1,0 +1,142 @@
+%% ===== (a) 启动 / 回前台：拉索引 → 比对 → 应用 =====
+sequenceDiagram
+  autonumber
+  participant W as WorkspacePage/HomePage
+  participant AS as AppState
+  participant SC as SyncController
+  participant SS as SyncStore(sync_state.json)
+  participant LS as LabelStore
+  participant API as SyncApi → Worker(D1+R2)
+
+  W->>AS: init()
+  AS->>LS: loadDraft/loadIndex（本地）
+  AS-->>W: inited=true
+  W->>SC: start()
+  SC->>API: GET /index
+  API-->>SC: items[{id,rev,updatedAt,lastDevice*}]
+  SC->>SS: loadState()
+  SC->>SC: 逐工程比对 local.rev 与 server.rev
+  loop 每个工程
+    alt 仅服务端更新（server.rev > local.baseRev）
+      SC->>API: GET /project/:id
+      API-->>SC: payload + rev
+      SC->>LS: 写 collection_<id>.json + index.json
+      SC->>SS: 更新 rev/updatedAt/status=synced
+    else 仅本地更新（本地脏且 server 未动）
+      SC->>SC: scheduleUpload(cid)（debounce 30s）
+    else 双侧都变（都 > 共同 baseRev）
+      SC->>SS: status=conflict
+    end
+  end
+  SC->>AS: refreshCollections()
+  SC-->>W: notifyListeners() → 刷新徽标/状态栏
+
+%% ===== (b) 保存 → debounce 上传 → 冲突分支 =====
+sequenceDiagram
+  autonumber
+  participant U as 用户
+  participant W as WorkspacePage
+  participant AS as AppState
+  participant SC as SyncController
+  participant SS as SyncStore
+  participant LS as LabelStore
+  participant API as SyncApi
+
+  U->>W: Ctrl+S
+  W->>AS: finishCollection()
+  AS->>LS: 写 collection_<id>.json / index.json
+  AS->>SC: onLocalSaved(cid)
+  SC->>SS: status=pendingUpload
+  Note over SC: debounce 30s（多次保存合并为一次）
+  SC->>API: PUT /project/:id {baseRev, payload, ...}
+  alt baseRev == serverRev
+    API-->>SC: 200 {rev: baseRev+1}
+    SC->>SS: rev=新值, status=synced, pendingCount--
+  else 冲突
+    API-->>SC: 409 {serverRev, serverUpdatedAt, serverDeviceName}
+    SC->>SS: status=conflict
+    SC->>U: 弹冲突框
+    alt 另存冲突副本（默认推荐）
+      SC->>AS: 新建本地工程 cid2=「名称(本机-<设备> <日期>)」保存本机改动
+      SC->>API: GET /project/:id（拉云端覆盖 cid）
+      SC->>SS: cid 关联 serverRev, status=synced；cid2 status=pendingUpload
+    else 保留本机
+      SC->>API: PUT /project/:id {baseRev: serverRev}（用刚拿到的 serverRev 重传）
+      API-->>SC: 200 {rev: serverRev+1}
+    else 保留云端
+      SC->>API: GET /project/:id
+      SC->>LS: 覆盖本地 collection_<id>.json
+    end
+  end
+
+%% ===== (c) 离线队列重放（网络恢复） =====
+sequenceDiagram
+  autonumber
+  participant NET as 网络探测(轮询 /ping)
+  participant SC as SyncController
+  participant SS as SyncStore(loadQueue)
+  participant API as SyncApi
+
+  NET->>SC: 网络恢复（连续 2 次 /ping 成功）
+  SC->>SS: loadQueue()
+  loop 按 enqueuedAt 升序，逐条
+    SC->>API: PUT /project/:id {baseRev,...}
+    alt 200
+      API-->>SC: 200 {rev}
+      SC->>SS: 出队 + 更新 rev
+    else 409
+      API-->>SC: 409
+      SC->>SS: 标记 conflict，出队，通知 UI
+    else 网络错误/5xx
+      API-->>SC: err
+      SC->>SS: attempts+1，保留在队，中断本轮
+    end
+  end
+  SC->>SC: flush 完毕 → 触发一次 pullIndex
+
+%% ===== 桌面：应用启动 =====
+sequenceDiagram
+  autonumber
+  participant M as main.dart
+  participant WP as WorkspacePage
+  participant AS as AppState
+  participant SC as SyncController
+  participant DI as DeviceIdentity
+  participant AP as AppPaths
+
+  M->>M: WidgetsFlutterBinding.ensureInitialized()
+  M->>M: Platform.isWindows ? WorkspacePage : HomePage
+  M->>AS: AppState()..init()
+  AS->>AP: baseDir() → %APPDATA%\ovimap
+  AS->>AS: loadDraft/loadIndex/loadFolders
+  AS-->>WP: inited=true
+  WP->>SC: (Provider) SyncController..start()
+  SC->>DI: load()（deviceId/deviceName/token/serverBase）
+  alt 已配置令牌
+    SC->>SC: pullIndex() → flushQueue() → 启动 /ping 轮询 + 30s debounce 定时
+  else 未配置
+    SC->>WP: 提示「去设置填同步令牌」（不阻塞本地使用）
+  end
+
+%% ===== 桌面：导出 DXF =====
+sequenceDiagram
+  autonumber
+  participant U as 用户
+  participant WP as WorkspacePage
+  participant EC as 导出对话框
+  participant EX as DxfExporter（不改语义）
+  participant ES as ExportSaver
+  participant FP as file_picker.saveFile
+
+  U->>WP: Ctrl+E
+  WP->>EC: 打开导出对话框
+  EC->>EX: export(name, labels) → 写 AppPaths.exportDir()
+  EX-->>EC: File（GBK/R12+R2000/校验器，全部照旧）
+  EC->>ES: saveOrShare(context, file)
+  alt Windows
+    ES->>FP: saveFile(fileName:'<name>.dxf', type: custom)
+    FP-->>ES: 目标绝对路径（用户选择/取消）
+    ES->>ES: 拷贝到目标；成功提示
+  else 移动端
+    ES->>ES: share_plus.shareXFiles（现状不变）
+  end

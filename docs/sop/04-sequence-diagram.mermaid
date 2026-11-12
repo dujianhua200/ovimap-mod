@@ -1,0 +1,37 @@
+sequenceDiagram
+  actor U as 用户
+  participant D as showDxfOptions(dialogs)
+  participant DX as DxfExporter
+  participant BF as BasemapFetcher
+  participant BC as BasemapCache
+  participant OP as OverpassClient
+  participant TD as TiandituClient(兜底)
+
+  U->>D: 勾选 版本R2000 / 图层 / 范围880m / 天地图兜底
+  D->>DX: export(labels, version, rangeM, layerFlags, tdtKey, refresh, basemap:null)
+  alt includeSurroundings 且 basemap==null
+    DX->>BF: fetchFor(labels, rangeM, tdtKey, useTdt, refresh)
+    par 道路/建筑/地名 并行
+      BF->>BC: read("roads", bbox)
+      alt 命中且未过期
+        BC-->>BF: cached JSON (state=cached, 离线可用)
+      else 未命中/刷新
+        BF->>OP: fetchRaw(query, endpoints)  // 多镜像并行竞速, 15s
+        OP-->>BF: JSON / error
+        BF->>BC: write("roads", bbox, json)
+      end
+    and building / places 同上
+    end
+    opt 地名为空且 useTdt
+      BF->>TD: poiInBounds(bbox, 关键词, key)
+      TD-->>BF: POI 点 (兜底补名)
+    end
+    BF-->>DX: BasemapData{roads,buildings,places,report}
+  end
+  DX->>DX: _pickScale(线路bbox) ; 图层表(370/420 gate by version)
+  DX->>DX: 业务层(杆路/管廊/桩号/标签/配线图) —— 不变
+  DX->>DX: 底图: 道路双线+中心线(纸面mm x scale) / 建筑轮廓+填充(HATCH|SOLID) / 地名
+  DX->>DX: 文字后置 -> 图框/图例/指北针/图签
+  DX->>DX: GBK 字节写盘 (robustWriteBytes)
+  DX-->>D: DxfExportResult(file, warnings, report)
+  D-->>U: 失败三态结构化提示 + shareFile

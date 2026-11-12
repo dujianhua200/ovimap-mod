@@ -1,0 +1,145 @@
+classDiagram
+  class AppPaths {
+    <<static>>
+    +Directory baseDir()
+    +Directory labelsDir()
+    +Directory tilesDir()
+    +Directory exportDir()
+    +Directory basemapDir()
+    +Directory photosDir()
+    +void setBaseForTest(Directory)
+  }
+  class PlatformCaps {
+    <<static>>
+    +bool isDesktop
+    +bool hasGps
+    +bool hasCompass
+    +bool hasCamera
+    +bool supportsFileSaveDialog
+  }
+  class DeviceIdentity {
+    +String deviceId
+    +String deviceName
+    +String token
+    +String serverBase
+    +Future~void~ load()
+    +Future~void~ save()
+    +bool get configured
+  }
+  class CollectionMeta {
+    +String id
+    +String name
+    +String kind
+    +int count
+    +String folder
+    +int createdAt
+    +int rev
+    +int updatedAt
+    +String lastDeviceId
+    +String lastDeviceName
+    +fromJson(Map) CollectionMeta
+    +toJson() Map
+  }
+  class LabelStore {
+    <<singleton>>
+    +Future~Directory~ baseDir()
+    +Future~Directory~ labelsDir()
+    +Future~String~ finishCollection()
+    +Future~List~MapLabel~~ loadCollection(String cid)
+    +Future~void~ saveCollectionLabels(String cid, List labels)
+    +Future~List~CollectionMeta~~ loadIndex()
+    +Future~void~ deleteCollection(String cid)
+  }
+  class SyncStatus {
+    <<enum>>
+    synced
+    pendingUpload
+    conflict
+    localOnly
+  }
+  class SyncMeta {
+    +String cid
+    +int rev
+    +int updatedAt
+    +String lastDeviceId
+    +String lastDeviceName
+    +SyncStatus status
+  }
+  class QueueItem {
+    +String cid
+    +String op
+    +int baseRev
+    +int enqueuedAt
+    +int attempts
+    +String lastError
+  }
+  class SyncStore {
+    +Future~Map~String,SyncMeta~~ loadState()
+    +Future~void~ saveState(Map)
+    +Future~List~QueueItem~~ loadQueue()
+    +Future~void~ saveQueue(List)
+  }
+  class SyncApi {
+    +Future~IndexResult~ fetchIndex(int since)
+    +Future~ProjectResult~ fetchProject(String cid, int rev)
+    +Future~PutResult~ putProject(String cid, PutBody body)
+    +Future~List~VersionInfo~~ history(String cid)
+    +Future~int~ restore(String cid, int rev)
+    +Future~bool~ ping()
+  }
+  class SyncController {
+    <<ChangeNotifier>>
+    +SyncStatus status
+    +int pendingCount
+    +int lastSyncAt
+    +Future~void~ start()
+    +Future~void~ pullIndex()
+    +Future~void~ pullProject(String cid)
+    +void onLocalSaved(String cid)
+    +void scheduleUpload(String cid)
+    +Future~void~ flushQueue()
+    +Future~void~ manualSync()
+    +Future~ConflictOutcome~ resolve(String cid, ConflictChoice)
+  }
+  class ExportSaver {
+    <<static>>
+    +Future~bool~ saveOrShare(BuildContext, File)
+  }
+  class AppState {
+    <<ChangeNotifier>>
+    +Future~void~ init()
+    +Future~String~ finishCollection(String kind)
+    +void undo()
+    +void redo()
+    +Future~void~ refreshCollections()
+  }
+  class MapCanvas {
+    <<widget>>
+    +AppState st
+    +Callbacks callbacks
+  }
+  class WorkspacePage {
+    <<widget>>
+  }
+  class HomePage {
+    <<widget>>
+  }
+
+  AppPaths <.. LabelStore
+  AppPaths <.. PhotoService
+  PlatformCaps ..> LocService
+  ExportSaver ..> LabelStore
+  SyncController --> SyncApi
+  SyncController --> SyncStore
+  SyncController --> DeviceIdentity
+  SyncController --> LabelStore
+  SyncStore ..> SyncMeta
+  SyncStore ..> QueueItem
+  SyncApi ..> CollectionMeta
+  AppState --> LabelStore
+  AppState ..> SyncController
+  LabelStore ..> CollectionMeta
+  WorkspacePage ..> MapCanvas
+  HomePage ..> MapCanvas
+  WorkspacePage --> AppState
+  WorkspacePage --> SyncController

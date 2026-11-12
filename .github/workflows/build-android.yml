@@ -1,0 +1,264 @@
+# ============================================================================
+#  滑洲云图 ovimap —— Android 出包（universal APK，侧载即用）
+#
+#  为什么 Android 也走 ubuntu-latest（1x）：
+#    · 出包只在打 v* 标签或手动时触发，频次低，但仍应尽量省额度；
+#      Android 构建不需要 Xcode / MSVC，纯 Linux 即可，没必要上更贵的 runner。
+#
+#  为什么本机代理环境不适合本地出包：
+#    · 本机 shell 走 HTTP 代理，会把 maven.google.com 当成外网请求劫持，
+#      doctor / 依赖解析报 502，Android 依赖拉不下来，本地出包不可靠。
+#      GitHub runner 无代理、网络干净，出包上云更稳。
+#
+#  为什么用 `flutter build apk` 而不是裸 `./gradlew`：
+#    · android/settings.gradle.kts 强制要求 local.properties 里有 flutter.sdk，
+#      而该文件只有 `flutter build` 会自动生成；裸 gradlew 会直接抛
+#      "flutter.sdk not set in local.properties"。
+#    · `flutter build apk` 默认产出 universal APK（单文件，用户直接侧载，不用挑 ABI）。
+#
+#  触发：打 v* 标签（就是要包）或手动 workflow_dispatch。
+#  ⚠️ 不要加 paths-ignore：打了 tag 就是要出包，文档改动也照出。
+# ============================================================================
+
+name: Android 打包
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# 同一条 ref 重复触发时，取消上一次未跑完的构建。
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+# 打 v* 标签时要用 softprops/action-gh-release 创建 / 更新 Release 并上传资产，
+# 这需要 contents: write。
+#
+# ⚠️ 必须显式声明：本仓库的 actions 默认工作流权限是 **read**
+# （`gh api repos/dujianhua200/ovimap/actions/permissions/workflow` → default_workflow_permissions=read），
+# 不声明的话 GITHUB_TOKEN 只能读，最后一步会以
+# 「Resource not accessible by integration」失败 —— 包照出，但挂不上 Release。
+permissions:
+  contents: write
+
+env:
+  # 与 docs/BUILD-windows.md 记录的基线一致。升级 Flutter 时只改这一处。
+  FLUTTER_VERSION: '3.47.2'
+  FLUTTER_CHANNEL: stable
+
+jobs:
+  build-android:
+    name: Android universal APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # GitHub 不允许在 if 里直接读 secrets，只能用 env 中转。
+    # 这条 KS_B64 只为驱动下面的「还原签名」守卫步骤（无密钥 / fork 场景仍可出包）。
+    env:
+      KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        # 项目锁死 Java 17：compileOptions / kotlin jvmTarget / AGP 9.1.0 / Gradle 9.3.1 基线。
+        # 别用 21。subosito/flutter-action 没有 java-version 入参，JDK 必须单独用 setup-java。
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 安装 Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      - name: 腾出磁盘空间
+        # 只清与本构建无关的预装大件（.NET / GHC / Boost）。SDK 里的 system-images
+        # （模拟器镜像，本项目不用）也一并清掉，给 NDK 留位置。
+        # 注意：**不要**动 $AGENT_TOOLSDIRECTORY —— Java 与 Flutter 都装在那里面。
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost 2>/dev/null || true
+          sudo rm -rf "${ANDROID_HOME:-/usr/local/lib/android/sdk}/system-images" 2>/dev/null || true
+          df -h / | tail -1
+
+      - name: 准备 Android SDK（runner 已预装 SDK，这里只补必需组件）
+        # ⚠️ 不要用 android-actions/setup-android@v3：它内部会执行 `sdkmanager tools`，
+        # 而新版 sdkmanager 已移除 `tools` 包 → 报 `Failed to find package 'tools'`
+        # 并 exit 1，整个 job 在第一步就挂（实测于 2026-09-18，runner 镜像 cmdline-tools 16.0）。
+        # runner 镜像本身已带 SDK（/usr/local/lib/android/sdk），我们只需补组件 + 接受许可。
+        #
+        # 组件版本取自 Flutter 3.47.2 的 FlutterExtension.kt（本机同源核对）：
+        #   compileSdkVersion = 36 / targetSdkVersion = 36 / minSdkVersion = 24
+        #   ndkVersion = 28.2.13676358
+        # 显式安装而不是指望 AGP 自动补齐 —— 自动补齐失败时报错位置很靠后，难定位。
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          [ -n "$SDK" ] || SDK=/usr/local/lib/android/sdk
+          if [ ! -d "$SDK" ]; then
+            echo "::error::未找到 Android SDK（尝试过 \$ANDROID_HOME / \$ANDROID_SDK_ROOT / $SDK）"
+            exit 1
+          fi
+          echo "ANDROID_HOME=$SDK"       >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK"   >> "$GITHUB_ENV"
+          echo "使用 SDK：$SDK"
+
+          SDKMGR=$(ls -1 "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -1)
+          if [ ! -x "$SDKMGR" ]; then
+            echo "::error::未找到 sdkmanager（$SDK/cmdline-tools/*/bin/sdkmanager）"
+            exit 1
+          fi
+          echo "sdkmanager：$SDKMGR"
+
+          # 不加 pipefail：yes 收尾的 SIGPIPE 会污染管道状态。
+          # 不写 set -o pipefail 时管道取最后一个命令的退出码，正是我们要的。
+          yes | "$SDKMGR" --licenses >/dev/null 2>&1 || true
+          yes | "$SDKMGR" --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;28.2.13676358"
+
+          echo "--- 已装组件 ---"
+          "$SDKMGR" --list_installed || true
+
+      - name: 读取版本号（来自 pubspec.yaml）
+        run: |
+          raw=$(grep -m1 '^version:' pubspec.yaml | sed 's/version:[[:space:]]*//' | tr -d '\r ')
+          name=${raw%%+*}
+          number=${raw#*+}
+          [ "$number" = "$raw" ] && number=0
+          echo "BUILD_NAME=$name"   >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$number" >> "$GITHUB_ENV"
+          echo "版本：$name+$number"
+
+      - name: 缓存 Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          # 任一 gradle 脚本或 wrapper 属性变才失效；否则复用本地缓存，省去重新下载。
+          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      - name: 还原签名（CI Secret 注入 keystore + key.properties）
+        if: env.KS_B64 != ''
+        run: |
+          echo "$KS_B64" | base64 -d > android/ovimap.keystore
+          {
+            echo "storeFile=ovimap.keystore"
+            echo "storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}"
+            echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}"
+            echo "keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}"
+          } > android/key.properties
+          echo "已还原 android/ovimap.keystore 与 android/key.properties"
+
+      - name: 降低 CI 侧 JVM 堆内存（只改检出副本，不落库）
+        run: |
+          # android/gradle.properties 写死 -Xmx8G -XX:MaxMetaspaceSize=4G，
+          # 那是给本机 8G 内存机器调的；CI runner 内存有限，按 8G 起 JVM 会挤爆 OOM。
+          # 这里只 sed 改工作区副本（后续 git 不会提交），把堆降到 4G / 元空间 2G。
+          sed -i 's/-Xmx8G/-Xmx4G/; s/-XX:MaxMetaspaceSize=4G/-XX:MaxMetaspaceSize=2G/' android/gradle.properties
+          grep -n "jvmargs" android/gradle.properties || true
+
+      - name: 环境自检（构建失败定位用，本身不致命）
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          flutter doctor -v || true
+
+      - name: 拉取依赖
+        run: flutter pub get
+
+      - name: 静态分析（门禁）
+        # error / warning 仍致命，info 放行（与 ci.yml 同口径）。
+        run: flutter analyze --no-fatal-infos
+
+      - name: 单元测试（门禁）
+        # 打 tag 时桌面两个 job 已各跑过一遍，这里是第三遍 —— 但 ubuntu 是 1x 计费，
+        # 一遍约 1 分钟，代价可忽略；而手动单独跑本 workflow 时不会有别的门禁，
+        # 不跑就等于把没测过的代码签进发布包，不值当。
+        #
+        # 至多一次重试：挡 flutter_tester 收尾偶发崩溃（见 ci.yml 同步骤注释）。
+        run: |
+          flutter test && exit 0
+          echo "::warning::第一次运行非零退出 —— 重试一次；若两次都红则是真失败"
+          flutter test
+
+      - name: 构建 Release APK（universal）
+        run: flutter build apk --release --build-name=$BUILD_NAME --build-number=$BUILD_NUMBER
+
+      - name: 重命名为可读文件名
+        run: |
+          mv build/app/outputs/flutter-apk/app-release.apk "ovimap-android-${BUILD_NAME}.apk"
+          ls -lh "ovimap-android-${BUILD_NAME}.apk"
+
+      - name: 校验 APK 签名（防「静默回退 AGP 内置 debug 签名」）
+        # 为什么必须校验：build.gradle.kts 的签名解析是三级降级，最后一级会退回 AGP
+        # 内置 debug 签名。那条路径「构建会成功、门禁会绿、Release 会照挂包」，但签名与
+        # 手机上的旧版不同 —— 用户侧载时报 INSTALL_FAILED_UPDATE_INCOMPATIBLE，
+        # 一旦卸载重装就丢现场数据。这个失效模式必须从「静默」变「响亮」。
+        #
+        # 用 apksigner 而不是 keytool -printcert -jarfile：后者只能看 v1(JAR) 签名，
+        # 新版 AGP 可能只签 v2/v3，会误判。apksigner 三种方案都认。
+        env:
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          # 只用 -eu：加 pipefail 会让「grep | head -1」因 SIGPIPE 反噬，
+          # 把正常的指纹提取判成失败。变量缺失/不一致两种失败在下面显式判。
+          set -eu
+          apk="ovimap-android-${BUILD_NAME}.apk"
+
+          if [ -z "${KS_B64:-}" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 为空 —— 本次构建已回退到 AGP 内置 debug 签名。该包无法覆盖安装手机上的旧版（INSTALL_FAILED_UPDATE_INCOMPATIBLE，卸载重装会丢现场数据）。发版前请先配置该 Secret。"
+            exit 1
+          fi
+
+          norm() { tr -d ':' | tr 'A-Z' 'a-z' | tr -d ' \t\r'; }
+
+          expected=$(keytool -list -v \
+              -keystore android/ovimap.keystore \
+              -alias "$ANDROID_KEY_ALIAS" \
+              -storepass "$ANDROID_KEYSTORE_PASSWORD" 2>/dev/null \
+            | grep -E 'SHA1:' | grep -oE '([0-9A-F]{2}:){19}[0-9A-F]{2}' | head -1 | norm)
+
+          apksigner=$(ls -1 "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+          if [ ! -x "$apksigner" ]; then
+            echo "::error::找不到 apksigner（\$ANDROID_HOME/build-tools/*/apksigner），无法校验签名"
+            exit 1
+          fi
+
+          actual=$("$apksigner" verify --print-certs "$apk" \
+            | grep -iE 'SHA-1 digest' | head -1 | grep -oiE '([0-9a-f]{2}){20}' | head -1 | norm)
+
+          echo "keystore 期望 SHA1：$expected"
+          echo "APK 实际  SHA1：$actual"
+
+          if [ -z "$expected" ] || [ -z "$actual" ]; then
+            echo "::error::签名指纹提取失败（expected='$expected' actual='$actual'），不放过"
+            exit 1
+          fi
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::APK 签名与注入的 keystore 不一致 —— 极可能静默回退到了 AGP 内置 debug 签名，或 Secret 配的不是同一个 keystore。"
+            exit 1
+          fi
+          echo "签名一致 ✓（可与手机已装旧版直接覆盖安装）"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ovimap-android-${{ env.BUILD_NAME }}
+          path: ovimap-android-${{ env.BUILD_NAME }}.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 挂到 Release（仅打 v* 标签时）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ovimap-android-${{ env.BUILD_NAME }}.apk
+          fail_on_unmatched_files: true

@@ -1,0 +1,128 @@
+classDiagram
+  class AppState {
+    +List~MapLabel~ labels
+    +List~CollectionMeta~ collections
+    +List~MapLabel~ topoColl
+    +String topoCid
+    +AppMode mode
+    +Set~String~ selectedIds
+    +String defTypeId
+    +int defSegKind
+    +String defSegCable
+    +double defSlackM
+    +pushUndoSnapshot()
+    +undoDraft()
+    +addLabelAtWgs(lat,lon) MapLabel
+    +selectChain(lineGroupId)
+    +selectInDisplayBounds(minLat,minLon,maxLat,maxLon)
+    +applyBatch(BatchEdit) int
+    +applyTemplate(ProjectTemplate)
+    +autoPlacePoles(...) int
+    +finishCollection(kind) Future~String~
+  }
+  class AppMode {
+    <<enumeration>>
+    view
+    edit
+    measureDist
+    measureArea
+    topoLink
+    boxSelect
+  }
+  class MapLabel {
+    +String id
+    +String typeId
+    +String name
+    +int segKind
+    +String segCable
+    +double slackM
+    +String lineGroupId
+    +double distanceM
+    +String distLabel
+    +clone() MapLabel
+  }
+  class BatchEdit {
+    +int segKind
+    +String segCable
+    +double slackM
+    +String namePrefix
+    +bool renumber
+  }
+  class ProjectTemplate {
+    +String id
+    +String name
+    +String defTypeId
+    +int defSegKind
+    +String defSegCable
+    +double defSlackM
+    +List~ProjectTemplate~ presets
+  }
+  class DesignDiffReport {
+    +List~DiffPoleItem~ poles
+    +List~DiffSegItem~ segs
+    +DiffSummary summary
+    +List~String~ notes
+    +changedPoles() List~DiffPoleItem~
+  }
+  class DiffPoleItem {
+    +String key
+    +DiffStatus status
+    +double offsetM
+  }
+  class DiffSegItem {
+    +String seg
+    +double designM
+    +double compM
+    +double deltaM
+  }
+  class DiffSummary {
+    +int added
+    +int removed
+    +int moved
+    +int kept
+    +double netLenDiffM
+  }
+  class RouteLayout {
+    +bearingDeg(...) double
+    +destination(...) List~double~
+    +autoPoles(...) List~List~double~~
+  }
+  class ArchiveBookExporter {
+    +export(...) ArchiveBookResult
+  }
+  class ArchiveBookResult {
+    +File zip
+    +List~String~ included
+    +List~String~ skipped
+  }
+  class CsvExporter {
+    +exportDesignDiff(name,design,completion,threshold) File
+    +buildDesignDiff(design,completion,threshold) DesignDiffReport
+  }
+  class DxfExporter
+  class PhotoBookExporter
+  class KmlExporter
+  class TopoPngExporter
+  class ExportCenter {
+    <<dialogs>>
+    +openExportCenter(ctx,st)
+    +showArchiveBookDialog(ctx,st)
+    +showDesignDiffDialog(ctx,st,meta)
+  }
+
+  AppState --> AppMode
+  AppState "1" o-- "*" MapLabel : labels / topoColl
+  AppState ..> BatchEdit : applyBatch
+  AppState ..> ProjectTemplate : applyTemplate
+  AppState ..> RouteLayout : autoPlacePoles
+  BatchEdit ..> MapLabel : 赋值 segKind/segCable/slackM/name
+  ProjectTemplate ..> MapLabel : 默认值(不改语义)
+  RouteLayout ..> MapLabel : 落点
+  ArchiveBookExporter ..> DxfExporter
+  ArchiveBookExporter ..> CsvExporter
+  ArchiveBookExporter ..> PhotoBookExporter
+  ArchiveBookExporter ..> ArchiveBookResult
+  CsvExporter ..> DesignDiffReport
+  ExportCenter ..> CsvExporter : buildDesignDiff
+  ExportCenter ..> ArchiveBookExporter
+  ExportCenter ..> ArchiveBookResult

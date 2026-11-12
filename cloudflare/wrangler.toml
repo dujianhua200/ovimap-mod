@@ -1,0 +1,33 @@
+# 滑洲云图 ovimap 同步 Worker（架构文档 §4.7）
+# 独立 Worker，**不复用**用户已有的反代 Worker，避免耦合、互不影响升级。
+
+name = "ovimap-sync"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+# 单用户共享令牌；保留版本数（可在 Cloudflare 控制台改）。
+workers_dev = true
+
+[vars]
+RETENTION = "10"
+
+# D1：索引 / rev / 版本元数据（条件更新做乐观并发）。
+[[d1_databases]]
+binding = "DB"
+database_name = "ovimap-sync"
+# 用 `npx wrangler d1 create ovimap-sync` 输出的 database_id 替换本行。
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+# R2：每版本完整快照 blob。
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "ovimap-snapshots"
+
+# 专属子域路由：`sync.<域名>/*`（Workers 路由按最长前缀匹配，不与既有反代冲突）。
+# 若只能用一个域名，则改为路径形式（注意与反代 route 不重叠）：
+#   routes = [{ pattern = "example.com/sync/*", zone_name = "example.com" }]
+routes = [
+  { pattern = "sync.example.com/*", zone_name = "example.com" }
+]
+
+# `SYNC_TOKEN` 作为 Worker Secret 设置（不要写进本文件）：
+#   npx wrangler secret put SYNC_TOKEN

@@ -1,0 +1,73 @@
+# ============================================================================
+#  滑洲云图 ovimap —— 日常构建 / 测试门禁（最便宜）
+#
+#  为什么门禁跑在 ubuntu-latest 上：
+#    · 计费倍率：Linux 1x，Windows 2x，macOS 桌面 runner 是 ×10。
+#      门禁是「每次 push / 每次 PR」都会触发的东西，绝不能用 macOS 跑（一跑烧 10 倍）。
+#    · flutter test 是纯 Dart 单测，不依赖 Android SDK / JDK，也不需要桌面工具链，
+#      任何 runner 都能跑，自然选最便宜的 Linux。
+#    · 桌面双平台的「出包 + 平台专项测试」交给 build-desktop.yml（打 tag / 手动时跑），
+#      不在这里重复跑，避免白烧 macOS 额度。
+#
+#  触发：push 到 main/master（文档改动除外）+ PR + 手动。
+#  ⚠️ 绝对不要在这里写 tags：打 tag 出包由各出包流水线负责，门禁只管分支与 PR。
+# ============================================================================
+
+name: CI 门禁
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+# 同一条 ref 重复推送 / 重开 PR 时，取消上一次未跑完的构建，避免排队浪费额度。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# 门禁只需读代码，不需要写权限。
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: 静态分析 + 单元测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Flutter 3.47.2
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.2'
+          channel: stable
+          cache: true
+
+      - name: 拉取依赖
+        run: flutter pub get
+
+      - name: 静态分析（门禁）
+        # 项目有约 68 条 info 级 lint（测试 / 工具脚本里的 print、
+        # drawer_panel 的 use_build_context_synchronously 等）。
+        # --no-fatal-infos 只放行 info，error / warning 仍然会让构建失败。
+        # 想收紧时去掉该参数即可。
+        run: flutter analyze --no-fatal-infos
+
+      - name: 单元测试（门禁）
+        # 已知偶发缺陷（不是我们代码的问题）：flutter_tester 在收尾阶段 segfault，
+        # 表现为「用例全绿、汇总却有 4 条没算上、进程 exit 1」，日志里一条报错都没有。
+        # macOS 与 Linux 都实测到过；同一提交直接重跑即绿（见 docs/BUILD-cloud.md §5.6）。
+        #
+        # 这里做「至多一次」重试：确定性失败会连续两次都红，仍然拦得住；
+        # 只有这种偶发崩溃会被吸收掉。**不要**改成 `flutter test || true` —— 那才是掩盖问题。
+        run: |
+          flutter test && exit 0
+          echo "::warning::第一次运行非零退出 —— 若是已知的 flutter_tester 收尾偶发崩溃，重试一次；若两次都红则是真失败"
+          flutter test

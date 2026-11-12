@@ -1,0 +1,138 @@
+classDiagram
+  class DxfVersion {
+    <<enumeration>>
+    r12
+    r2000
+  }
+  class DxfLayerSpec {
+    +String name
+    +int aci
+    +int? trueColor
+    +int lineWeight
+    +String lineType
+    +bool business
+  }
+  class DxfLayers {
+    <<static>>
+    +List~DxfLayerSpec~ all
+    +Set~String~ basemap
+  }
+  class DxfExporter {
+    <<static>>
+    +export(name, labels, ..., version, rangeM, layerFlags, tdtKey, refreshBasemap, basemap) DxfExportResult
+    +_pickScale(...) int
+    +_appendPolyline(sb, layer, pts, closed, width, version, entityColor)
+    +_appendRoadDualAndCenter(sb, grade, cart, scale, version)
+    +_appendBuildingFill(sb, rings, version)
+    +_appendHatch(sb, layer, rings)
+    +_appendSolidFill(sb, rings)
+  }
+  class DxfExportResult {
+    +File file
+    +List~String~ warnings
+    +BasemapFetchReport? report
+  }
+  class BasemapFetcher {
+    <<static>>
+    +fetchFor(labels, rangeM, tdtKey, useTdt, refresh) BasemapData
+  }
+  class BasemapCache {
+    +read(kind, bbox) String?
+    +write(kind, bbox, json) void
+    +invalidate(bbox) void
+  }
+  class BasemapData {
+    +List~RoadPoly~ roads
+    +List~BuildingPoly~ buildings
+    +List~PlaceFeature~ places
+    +BasemapFetchReport report
+  }
+  class BasemapFetchReport {
+    +DatasetReport roads
+    +DatasetReport buildings
+    +DatasetReport places
+    +toWarnings() List~String~
+  }
+  class DatasetReport {
+    +FetchState state
+    +String source
+    +String? error
+    +int count
+  }
+  class FetchState {
+    <<enumeration>>
+    ok
+    cached
+    failed
+  }
+  class RoadPoly {
+    +List~List~double~~ pts
+    +RoadGrade grade
+    +String name
+  }
+  class BuildingPoly {
+    +List~List~List~double~~~ rings
+    +String name
+    +outer() List~List~double~~
+  }
+  class PlaceFeature {
+    +String name
+    +double lat
+    +double lon
+    +PlaceLevel level
+    +bool isArea
+  }
+  class RoadGrade {
+    <<enumeration>>
+    trunk
+    primary
+    secondary
+    tertiary
+    residential
+    service
+    other
+  }
+  class PlaceLevel {
+    <<enumeration>>
+    city
+    suburb
+    neighbourhood
+    town
+    village
+    hamlet
+    residential
+  }
+  class OverpassClient {
+    <<static>>
+    +fetchRaw(query, endpoints, timeout) String
+    +parseRoads(json) List~RoadPoly~
+    +parseBuildings(json) List~BuildingPoly~
+    +parsePlaces(json) List~PlaceFeature~
+  }
+  class OverpassEndpoints {
+    <<static>>
+    +builtin() List~String~
+    +resolve(userCustom) List~String~
+  }
+  class SearchService {
+    <<static>>
+    +search(q, tdtKey)
+    +poiInBounds(bbox, keyword, key) List~SearchResult~
+  }
+
+  BasemapFetcher ..> OverpassClient
+  BasemapFetcher ..> BasemapCache
+  BasemapFetcher ..> BasemapData
+  BasemapFetcher ..> SearchService : 地名兜底
+  OverpassClient ..> OverpassEndpoints
+  BasemapData "1" o-- "*" RoadPoly
+  BasemapData "1" o-- "*" BuildingPoly
+  BasemapData "1" o-- "*" PlaceFeature
+  BasemapData --> BasemapFetchReport
+  BasemapFetchReport "1" o-- "3" DatasetReport
+  RoadPoly --> RoadGrade
+  PlaceFeature --> PlaceLevel
+  DxfExporter ..> DxfVersion
+  DxfExporter ..> DxfLayers
+  DxfExporter ..> BasemapData : 渲染底图
+  DxfExporter ..> DxfExportResult

@@ -1,0 +1,99 @@
+%% A. ⋯工具 → 导出成果 → 统一面板（P0-1）
+sequenceDiagram
+  actor U as 用户
+  participant HP as HomePage
+  participant TM as tools_menu
+  participant EC as export_center
+  participant ED as showExportDialog
+  U->>HP: 点右侧栏 ⋯工具
+  HP->>TM: showToolsMenu(st)
+  U->>TM: 点「导出成果」
+  TM->>EC: openExportCenter(context, st)
+  alt 拓扑模式
+    EC->>EC: labels=st.topoColl, name=配线名
+  else 草稿非空
+    EC->>EC: labels=st.labels, name=projectName/当前草稿
+  else 草稿为空
+    EC-->>U: toast(没有可导出的数据)
+  end
+  EC->>ED: showExportDialog(context, labels, name)
+  U->>ED: 选 7 种导出之一
+  ED-->>U: shareFile(file)
+
+%% B. 框选 → 批量属性 → 一次性撤销（P0-2）
+sequenceDiagram
+  actor U as 用户
+  participant HP as HomePage
+  participant AS as AppState
+  participant BE as batch_edit
+  U->>HP: 编辑底栏「批量」→「进入框选」
+  HP->>AS: setMode(AppMode.boxSelect)
+  U->>HP: 地图拖出选框
+  HP->>AS: selectInDisplayBounds(min,max)
+  AS-->>HP: selectedIds(n) · 底栏 "已选 n 点"
+  U->>HP: 点「设置属性」
+  HP->>BE: showBatchEditDialog(st)
+  U->>BE: 设 敷设方式/型号/盘留/前缀 → 确定
+  BE->>AS: applyBatch(BatchEdit)
+  AS->>AS: pushUndoSnapshot() (一次)
+  AS->>AS: for id in selectedIds: 赋值
+  AS->>AS: _saveDraft(); notifyListeners()
+  Note over AS: 材料统计/工程量表随之重算
+  U->>AS: 撤销 → undoDraft()
+  AS-->>U: 一步还原整批修改
+
+%% C. 一键成册 → 组装 ZIP（P0-3）
+sequenceDiagram
+  actor U as 用户
+  participant TM as tools_menu
+  participant AB as export_center(成册)
+  participant AX as ArchiveBookExporter
+  participant EX as Dxf/Csv/PhotoBook
+  participant ST as LabelStore
+  U->>TM: 点「竣工资料一键成册」
+  TM->>AB: showArchiveBookDialog(st)
+  U->>AB: 选工程(收藏/当前草稿)
+  AB->>AX: export(name, labels, pointCount, totalLenM)
+  loop 4 个子产物
+    AX->>EX: 逐个生成(缺项 try/catch → skipped)
+    EX->>ST: exportDir() 落盘单文件
+  end
+  AX->>AX: Archive 组装 + 成册说明.txt
+  AX->>ST: robustWriteBytes(…_竣工资料成册.zip)
+  AX-->>AB: ArchiveBookResult(zip, included, skipped)
+  AB-->>U: shareFile(zip)
+
+%% D. 自动布杆（P0-5）
+sequenceDiagram
+  actor U as 用户
+  participant HP as HomePage
+  participant RT as route_tools
+  participant AS as AppState
+  participant RL as RouteLayout
+  U->>HP: 编辑底栏「自动布杆」
+  HP->>RT: showAutoPoleDialog(st)
+  U->>RT: 起/止点 + 档距(默认50m) + 前缀 + 杆型
+  RT->>AS: autoPlacePoles(...)
+  AS->>AS: pushUndoSnapshot()
+  AS->>RL: autoPoles(start,end,spacing)
+  RL-->>AS: [ [lat,lon] ... ]
+  loop 每个落点
+    AS->>AS: MapLabel(typeId, lineGroupId:新组, name='GK-n')
+  end
+  AS->>AS: _saveDraft(); notifyListeners()
+
+%% E. 设计↔竣工变更对照（P0-4）
+sequenceDiagram
+  actor U as 用户
+  participant DR as FavoritesDrawer
+  participant EC as export_center
+  participant CS as CsvExporter
+  U->>DR: 每项「竣工对比设计」
+  DR->>EC: showDesignDiffDialog(st, completionMeta)
+  U->>EC: 选设计工程 + 阈值(默认1m) + 仅看变更项
+  EC->>CS: buildDesignDiff(design, completion, threshold)
+  CS-->>EC: DesignDiffReport(summary, poles, segs)
+  EC-->>U: 可读清单(头部汇总 增/删/偏移/净长度差)
+  U->>EC: 点「导出 CSV」
+  EC->>CS: exportDesignDiff(name, design, completion, threshold)
+  CS-->>U: shareFile(竣工对比设计.csv)

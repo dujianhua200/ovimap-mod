@@ -1,0 +1,45 @@
+name: ovimap
+description: "滑洲云图 - 通信线路工程勘察设计与竣工测量工具"
+publish_to: 'none'
+version: 3.9.6+26
+
+environment:
+  sdk: ^3.13.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_map: ^8.0.0
+  latlong2: ^0.9.1
+  provider: ^6.1.0
+  geolocator: ^13.0.0
+  flutter_compass: ^0.8.0
+  path_provider: ^2.1.0
+  shared_preferences: ^2.2.0
+  share_plus: ^10.0.0
+  http: ^1.2.0
+  intl: ^0.20.0
+  gbk_codec: ^0.4.0
+  image_picker: ^1.1.2
+  archive: ^3.6.1
+  # GeoJSON 底图从文件选择导入（SAF，无需存储权限）
+  # 固定 9.x：其 Android 端为纯 Java 实现，兼容本项目 AGP 9 + builtInKotlin=false；
+  # 10.x/11.x 起 Android 端改为 Kotlin 且依赖 AGP9 内置 Kotlin，会编译失败。
+  file_picker: ^9.2.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  path_provider_platform_interface: ^2.1.3
+  shared_preferences_platform_interface: ^2.4.0
+
+# file_picker 9.x 的 Android 端把 compileSdk 固定为 34，而其依赖 flutter_plugin_android_lifecycle
+# 在 2.0.28+ 起改为 `flutter.compileSdkVersion`（=36），导致 AGP 的 AAR 元数据校验失败。
+# 这里把该「既有传递依赖」钉回与其约束区间兼容的 2.0.22（compileSdk 34），
+# 以同时满足 file_picker(^2.0.22) 与 image_picker_android(^2.0.1)。未新增任何依赖。
+dependency_overrides:
+  flutter_plugin_android_lifecycle: 2.0.22
+
+flutter:
+  uses-material-design: true

@@ -1,0 +1,267 @@
+# ============================================================================
+#  滑洲云图 ovimap —— 桌面端双平台构建（Windows / macOS）
+#
+#  产出：
+#    · ovimap-windows-x64-<版本>.zip     解压后双击 ovimap.exe（免安装绿色版）
+#    · ovimap-macos-universal-<版本>.zip 解压后拖入「应用程序」即可运行
+#
+#  质量门禁：每个平台各自跑 flutter analyze + flutter test，测试不过就不出包。
+#  之所以不做「一个 job 跑 Linux 测试」，是因为 test/platform_caps_test.dart 等
+#  断言是按平台参数化的 —— Linux 全绿并不能证明 Windows / macOS 也绿。
+#
+#  触发方式：打 v* 标签 或 手动 workflow_dispatch 才出包。
+#
+#  为什么改成「只打 tag / 手动」：
+#    原 on.push 同时写了 branches 和 tags，一次发版 push 会跑两遍
+#    （main 一遍 + tag 一遍，两套不同 ref → concurrency 互不取消），
+#    实测白烧约 48 计费分钟。现在分支门禁交给 ci.yml（ubuntu 1x），
+#    桌面端只在打 tag 或手动时出包，避免重复消耗 macOS 额度。
+# ============================================================================
+
+name: 桌面端构建（Windows / macOS）
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# 同一分支重复推送时，取消上一次未跑完的构建，避免排队。
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: true
+
+# 打 v* 标签时要用 softprops/action-gh-release 创建/更新 Release 并上传资产，
+# 这需要 contents: write。
+#
+# ⚠️ 必须显式声明：本仓库的 actions 默认工作流权限是 **read**
+# （`gh api repos/<owner>/<repo>/actions/permissions/workflow` → default_workflow_permissions=read），
+# 不声明的话 GITHUB_TOKEN 只能读，最后一步会以
+# 「Resource not accessible by integration」失败 —— 构建产物照出，但挂不上 Release。
+permissions:
+  contents: write
+
+env:
+  # 与 docs/BUILD-windows.md 记录的基线一致（要求 >= 3.35）。
+  # 升级 Flutter 时只改这一处。
+  FLUTTER_VERSION: '3.47.2'
+  FLUTTER_CHANNEL: 'stable'
+
+jobs:
+  # --------------------------------------------------------------------------
+  #  Windows x64
+  # --------------------------------------------------------------------------
+  build-windows:
+    name: Windows x64 打包
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      - name: 读取版本号（来自 pubspec.yaml）
+        # 用 pwsh 而非 bash：Windows runner 的 $GITHUB_ENV 是反斜杠 Windows 路径，
+        # 交给 Git Bash 重定向容易踩转义坑，官方推荐写法是 Out-File -Append -Encoding utf8。
+        shell: pwsh
+        run: |
+          $raw = (Select-String -Path pubspec.yaml -Pattern '^version:\s*(.+)$').Matches[0].Groups[1].Value.Trim()
+          $parts = $raw -split '\+'
+          $name = $parts[0]
+          $number = if ($parts.Length -gt 1) { $parts[1] } else { '0' }
+          "BUILD_NAME=$name"     | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BUILD_NUMBER=$number" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "版本：$name+$number"
+
+      - name: 拉取依赖
+        run: flutter pub get
+
+      - name: 静态分析（门禁）
+        # 注意：本项目当前有 68 条 info 级 lint（多为测试/工具脚本里的 print、
+        # 以及 drawer_panel 的 use_build_context_synchronously），而 flutter analyze
+        # 默认把 info 也视为致命。这里只放行 info —— error 与 warning 仍然会让
+        # 构建失败。想收紧时去掉 --no-fatal-infos 即可。
+        run: flutter analyze --no-fatal-infos
+
+      - name: 单元测试（门禁）
+        # flutter_tester 收尾偶发崩溃（用例全绿却 exit 1，三平台都遇到过；
+        # v3.7.1 Windows 连续两次 591 全绿仍 exit 1 即此症状）：
+        # 至多重试一次，重试后仍挂才让门禁红。**禁止**改成 `|| true`。
+        shell: bash
+        run: |
+          # Windows 特有：并发跑测试文件时，「缓存/落盘」类重用例偶发命中
+          # 彼此写下的缓存（实测 Actual 读到缓存 JSON），macOS 因核数不同
+          # 侥幸不受影响。这里串行执行（-j 1）消除跨文件共享磁盘缓存的竞态；
+          # 仍然保留「至多一次重试」吸收 flutter_tester 收尾崩溃。
+          flutter test -j 1 || flutter test -j 1
+
+      - name: 启用 Windows 桌面支持
+        run: flutter config --enable-windows-desktop
+
+      - name: 构建 Release
+        run: flutter build windows --release --build-name=${{ env.BUILD_NAME }} --build-number=${{ env.BUILD_NUMBER }}
+
+      - name: 打包为 zip
+        shell: pwsh
+        run: |
+          $src = "build/windows/x64/runner/Release"
+          if (-not (Test-Path "$src/ovimap.exe")) {
+            Write-Error "未找到构建产物 $src/ovimap.exe"
+            exit 1
+          }
+
+          # Flutter 的 Windows 产物用 /MD 动态链接 C 运行库，ovimap.exe 会 import
+          # MSVCP140.dll / VCRUNTIME140.dll / VCRUNTIME140_1.dll。这些不在 Windows
+          # 自带范围内（只有 UCRT 是系统组件），缺了就是「双击无反应 / 报缺 dll」。
+          # 这里优先从 VS 的 Redist 目录整体拷入，取不到就逐个从 System32 兜底，
+          # 目标都是做出真正免安装的绿色版。
+          #
+          # 用 Get-Item 配通配符而不是 Get-ChildItem -Recurse：后者在
+          # C:\Program Files 下遇到无权限子目录会被静默中断，反而永远匹配不到。
+          $redistGlobs = @(
+            'C:\Program Files\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT',
+            'C:\Program Files (x86)\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT'
+          )
+          $crtDir = Get-Item -Path $redistGlobs -ErrorAction SilentlyContinue |
+                    Sort-Object FullName -Descending | Select-Object -First 1
+          if ($crtDir) {
+            Write-Host "VC 运行库目录：$($crtDir.FullName)"
+            Get-ChildItem -Path $crtDir.FullName -Filter *.dll | ForEach-Object {
+              Copy-Item $_.FullName -Destination $src -Force
+              Write-Host "  已打包 $($_.Name)"
+            }
+          }
+
+          # 兜底并校验：三个必需项一定要在（Redist 缺失或不全时从 System32 取）
+          $missing = @()
+          foreach ($n in @('msvcp140.dll','vcruntime140.dll','vcruntime140_1.dll')) {
+            if (Test-Path "$src/$n") { continue }
+            $sys = Join-Path $env:WINDIR "System32\$n"
+            if (Test-Path $sys) {
+              Copy-Item $sys -Destination $src -Force
+              Write-Host "  已打包 $n（取自 System32）"
+            } else {
+              $missing += $n
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host "警告：$($missing -join ', ') 均未找到，目标机器需自行安装 VC++ 2015-2022 x64 运行库" -ForegroundColor Yellow
+          }
+
+          $out = "ovimap-windows-x64-${{ env.BUILD_NAME }}.zip"
+          Compress-Archive -Path "$src/*" -DestinationPath $out -Force
+          $mb = [math]::Round((Get-Item $out).Length / 1MB, 1)
+          Write-Host "已生成 $out（${mb} MB）"
+          Get-ChildItem $src | Select-Object Name, Length | Format-Table
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ovimap-windows-x64-${{ env.BUILD_NAME }}
+          path: ovimap-windows-x64-${{ env.BUILD_NAME }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 挂到 Release（仅打 v* 标签时）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ovimap-windows-x64-${{ env.BUILD_NAME }}.zip
+          fail_on_unmatched_files: true
+
+  # --------------------------------------------------------------------------
+  #  macOS（universal：arm64 + x86_64）
+  # --------------------------------------------------------------------------
+  build-macos:
+    name: macOS 打包
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      - name: 读取版本号（来自 pubspec.yaml）
+        run: |
+          raw=$(grep -m1 '^version:' pubspec.yaml | sed 's/version:[[:space:]]*//' | tr -d '\r ')
+          name=${raw%%+*}
+          number=${raw#*+}
+          [ "$number" = "$raw" ] && number=0
+          echo "BUILD_NAME=$name"   >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$number" >> "$GITHUB_ENV"
+          echo "版本：$name+$number"
+
+      - name: 拉取依赖
+        run: flutter pub get
+
+      - name: 静态分析（门禁）
+        # 同 Windows 任务：只放行 info，error / warning 仍然致命。
+        run: flutter analyze --no-fatal-infos
+
+      - name: 单元测试（门禁）
+        # flutter_tester 收尾偶发崩溃（用例全绿却 exit 1，三平台都遇到过；
+        # v3.7.1 Windows 连续两次 591 全绿仍 exit 1 即此症状）：
+        # 至多重试一次，重试后仍挂才让门禁红。**禁止**改成 `|| true`。
+        shell: bash
+        run: |
+          flutter test || flutter test
+
+      - name: 启用 macOS 桌面支持
+        run: flutter config --enable-macos-desktop
+
+      - name: 构建 Release
+        # 未配置开发者证书时，Flutter 按工程里的 CODE_SIGN_IDENTITY = "-" 走
+        # ad-hoc 签名，产物可直接在本机运行（首次打开需右键「打开」绕过 Gatekeeper）。
+        run: flutter build macos --release --build-name=${{ env.BUILD_NAME }} --build-number=${{ env.BUILD_NUMBER }}
+
+      - name: 校验签名与架构
+        run: |
+          APP="build/macos/Build/Products/Release/ovimap.app"
+          test -d "$APP" || { echo "未找到 $APP"; exit 1; }
+          echo "--- 可执行文件架构（期望同时含 arm64 与 x86_64）---"
+          lipo -info "$APP/Contents/MacOS/ovimap" || true
+          echo "--- 签名校验 ---"
+          if ! codesign --verify --strict --verbose=2 "$APP" 2>&1; then
+            echo "签名不完整，补一次 ad-hoc 签名"
+            codesign --force --deep --sign - "$APP"
+            codesign --verify --strict --verbose=2 "$APP"
+          fi
+          echo "--- 已授予的沙箱权限 ---"
+          codesign -d --entitlements - "$APP" 2>/dev/null || true
+
+      - name: 打包为 zip
+        # 必须用 ditto：.app 是 bundle，内含符号链接与可执行位，
+        # 用 zip 打包会丢符号链接，解压出来直接打不开。
+        run: |
+          APP="build/macos/Build/Products/Release/ovimap.app"
+          OUT="ovimap-macos-universal-$BUILD_NAME.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT"
+          ls -lh "$OUT"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ovimap-macos-universal-${{ env.BUILD_NAME }}
+          path: ovimap-macos-universal-${{ env.BUILD_NAME }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 挂到 Release（仅打 v* 标签时）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ovimap-macos-universal-${{ env.BUILD_NAME }}.zip
+          fail_on_unmatched_files: true
