@@ -1,5 +1,5 @@
 name: ovimap
-description: "婊戞床浜戝浘 - 閫氫俊绾胯矾宸ョ▼鍕樺療璁捐涓庣宸ユ祴閲忓伐鍏?
+description: "滑洲云图 - 通信线路工程勘察设计与竣工测量工具"
 publish_to: 'none'
 version: 3.11.0+28
 
@@ -22,9 +22,9 @@ dependencies:
   gbk_codec: ^0.4.0
   image_picker: ^1.1.2
   archive: ^3.6.1
-  # GeoJSON 搴曞浘浠庢枃浠堕€夋嫨瀵煎叆锛圫AF锛屾棤闇€瀛樺偍鏉冮檺锛?
-  # 鍥哄畾 9.x锛氬叾 Android 绔负绾?Java 瀹炵幇锛屽吋瀹规湰椤圭洰 AGP 9 + builtInKotlin=false锛?
-  # 10.x/11.x 璧?Android 绔敼涓?Kotlin 涓斾緷璧?AGP9 鍐呯疆 Kotlin锛屼細缂栬瘧澶辫触銆?
+  # GeoJSON 底图从文件选择导入（SAF，无需存储权限）
+  # 固定 9.x：其 Android 端为纯 Java 实现，兼容本项目 AGP 9 + builtInKotlin=false；
+  # 10.x/11.x 起 Android 端改为 Kotlin 且依赖 AGP9 内置 Kotlin，会编译失败。
   file_picker: ^9.2.3
 
 dev_dependencies:
@@ -34,10 +34,10 @@ dev_dependencies:
   path_provider_platform_interface: ^2.1.3
   shared_preferences_platform_interface: ^2.4.0
 
-# file_picker 9.x 鐨?Android 绔妸 compileSdk 鍥哄畾涓?34锛岃€屽叾渚濊禆 flutter_plugin_android_lifecycle
-# 鍦?2.0.28+ 璧锋敼涓?`flutter.compileSdkVersion`锛?36锛夛紝瀵艰嚧 AGP 鐨?AAR 鍏冩暟鎹牎楠屽け璐ャ€?
-# 杩欓噷鎶婅銆屾棦鏈変紶閫掍緷璧栥€嶉拤鍥炰笌鍏剁害鏉熷尯闂村吋瀹圭殑 2.0.22锛坈ompileSdk 34锛夛紝
-# 浠ュ悓鏃舵弧瓒?file_picker(^2.0.22) 涓?image_picker_android(^2.0.1)銆傛湭鏂板浠讳綍渚濊禆銆?
+# file_picker 9.x 的 Android 端把 compileSdk 固定为 34，而其依赖 flutter_plugin_android_lifecycle
+# 在 2.0.28+ 起改为 `flutter.compileSdkVersion`（=36），导致 AGP 的 AAR 元数据校验失败。
+# 这里把该「既有传递依赖」钉回与其约束区间兼容的 2.0.22（compileSdk 34），
+# 以同时满足 file_picker(^2.0.22) 与 image_picker_android(^2.0.1)。未新增任何依赖。
 dependency_overrides:
   flutter_plugin_android_lifecycle: 2.0.22
 
@@ -45,13 +45,13 @@ flutter:
   uses-material-design: true
 
   assets:
-    # 鍥句緥搴擄細鐢ㄦ埛鐨?AutoCAD 鍥句緥鍥剧焊锛堝浘鍧楀畾涔?+ 鐗堝紡鏂囧瓧锛夈€?
-    # 瀵煎嚭 DXF 鏃剁洿鎺?INSERT 杩欓噷鐨勫浘鍧楋紝绗﹀彿鍑犱綍涓庣敤鎴风殑 CAD 鍥句緥涓€鑷淬€?
-    # 鏇挎崲鍥句緥 = 鎹㈣繖涓枃浠讹紝涓嶇敤鏀逛唬鐮併€?
+    # 图例库：用户的 AutoCAD 图例图纸（图块定义 + 版式文字）。
+    # 导出 DXF 时直接 INSERT 这里的图块，符号几何与用户的 CAD 图例一致。
+    # 替换图例 = 换这个文件，不用改代码。
     - assets/dxf/lispblock.dxf
-    # 鍐呯疆鍏滃簳搴曞浘锛堜俊闃冲競鐭㈤噺锛岀害 21MB锛実zip锛夈€?
-    # 鐜板満娌′俊鍙锋椂浠嶈兘鍑哄浘锛歄verpass/楂樺痉鎶撲笉鍒板氨鐢ㄥ畠銆?
-    # 鏉ユ簮锛氫笂娓?dujianhua200/ovimap v4.0.x 鐨?assets/buildings銆?
+    # 内置兜底底图（信阳市矢量，约 21MB，gzip）。
+    # 现场没信号时仍能出图：Overpass/高德抓不到就用它。
+    # 来源：上游 dujianhua200/ovimap v4.0.x 的 assets/buildings。
     - assets/buildings/xinyang.geojson.gz
     - assets/buildings/xinyang_roads.geojson.gz
     - assets/buildings/xinyang_places.geojson.gz
