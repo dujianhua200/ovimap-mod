@@ -81,8 +81,29 @@ jobs:
 
       - name: 文件编码检查（门禁）
         # 见 ci.yml 同名步骤：GBK 混入会让 flutter/Xcode 读文件时直接崩。
-        shell: bash
-        run: python3 tool/check_encoding.py || python tool/check_encoding.py
+        #
+        # Windows runner 没有 `python3`，只有 `python`；而 Windows 上的
+        # `python` 有时是应用商店占位符（运行即失败）。所以这里：
+        #   · 先试 `python`，退出码 0 即通过；
+        #   · 若因"命令不存在/占位符"失败（9009/127），再试 `py -3`；
+        #   · 两者都不可用 → 跳过（Linux 的 ci.yml 已强制兜底）；
+        #   · 其它非零码 = 真的编码违规 → 直接判红。
+        shell: pwsh
+        run: |
+          $targets = @(
+            @{ Exe = 'python'; Args = @() },
+            @{ Exe = 'py';     Args = @('-3') }
+          )
+          foreach ($t in $targets) {
+            if (-not (Get-Command $t.Exe -ErrorAction SilentlyContinue)) { continue }
+            & $t.Exe @($t.Args) tool/check_encoding.py
+            $code = $LASTEXITCODE
+            if ($code -eq 0) { exit 0 }
+            if ($code -in @(127, 9009)) { continue }   # 解释器不可用，换一个
+            Write-Host "编码检查失败（exit $code）"
+            exit 1
+          }
+          Write-Host "未找到可用 Python，跳过（编码门禁由 ci.yml 兜底）"
 
       - name: 拉取依赖
         run: flutter pub get

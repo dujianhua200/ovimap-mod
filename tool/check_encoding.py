@@ -31,6 +31,16 @@
 import subprocess
 import sys
 
+# ⚠️ Windows 控制台默认是 cp936/cp1252，直接 print 中文会抛
+# `UnicodeEncodeError: 'charmap' codec can't encode ...`，
+# 于是脚本在 Windows runner 上"因为打印失败"而非"检查失败"退出 1。
+# 强制把标准输出/错误切到 UTF-8（errors='replace' 兜底，绝不因打印而失败）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 # 按扩展名跳过的二进制/不可文本化文件
 BINARY_EXT = {
     '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp',
