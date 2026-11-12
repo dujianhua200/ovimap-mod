@@ -251,7 +251,11 @@ void main() {
 
   test('F1（强）：整块底图先写出、整块业务后写出（maxBasemapIdx < minBizIdx）', () async {
     final dir = Directory.systemTemp.createTempSync('qa2_order');
-    final text = await _export(dir, labels: _poles(kLat, kLon), bm: _stdBasemap());
+    // 注意：_poles 不传偏移时三点完全重合，v3.11 起"重合点不画零长线"，
+    // 于是没有任何业务实体，本用例会失去意义。这里显式给 dLat/dLon 让点分开。
+    final text = await _export(dir,
+        labels: _poles(kLat, kLon, dLat: 0.0006, dLon: 0.0008),
+        bm: _stdBasemap());
     final ents = _entities(text);
 
     int? minBiz, maxBiz, minBase, maxBase;

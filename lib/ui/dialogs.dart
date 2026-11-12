@@ -977,6 +977,15 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
   final corridorCtl =
       TextEditingController(text: prefs.getString('dxfCorridor') ?? '0');
 
+  // —— 出图口径（用户指定，现场统一）——
+  // 比例固定 1:3000：自动估算会随线路长度漂移，同一段路两次导出对不上。
+  // 0 表示"自动"（旧行为，保留给临时查看用）。
+  var fixedScale = prefs.getInt('dxfFixedScale') ?? 3000;
+  // 杆路多段线全局宽度（纸面毫米）：用户指定 0.5mm。
+  var rodWidthMm = prefs.getDouble('dxfRodWidthMm') ?? 0.5;
+  // 是否在符号上方写名称：默认关（用户口径"块中间没有原字"）。
+  var showNames = opt('dxfShowNames', false);
+
   // —— 搜索/兜底 key（导出与"底图检测"共用同一份，口径一致）——
   // 天地图 key：用户自定义优先，未配置则用内置兜底（单一来源）
   final userKey = prefs.getString(AppState.prefTdtKey)?.trim() ?? '';
@@ -1132,6 +1141,66 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
             value: symbols,
             activeColor: kAccent,
             onChanged: (v) => setSt(() => symbols = v ?? true),
+          ),
+          // —— 出图口径（现场统一）——
+          // 比例：固定 1:3000（可改）。自动估算会随线路长度漂移，
+          // 同一段路两次导出对不上，交付时很麻烦。
+          Padding(
+            padding: const EdgeInsets.only(top: 4, bottom: 2),
+            child: Row(children: [
+              const Text('出图比例 1:',
+                  style: TextStyle(color: kTextMain, fontSize: 13)),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 96,
+                child: DropdownButtonFormField<int>(
+                  value: const [0, 500, 1000, 2000, 2500, 3000, 5000, 10000]
+                          .contains(fixedScale)
+                      ? fixedScale
+                      : 3000,
+                  isDense: true,
+                  dropdownColor: kPanelBg,
+                  style: const TextStyle(color: kTextMain, fontSize: 13),
+                  decoration: dec('比例'),
+                  items: const [
+                    DropdownMenuItem(value: 0, child: Text('自动')),
+                    DropdownMenuItem(value: 500, child: Text('500')),
+                    DropdownMenuItem(value: 1000, child: Text('1000')),
+                    DropdownMenuItem(value: 2000, child: Text('2000')),
+                    DropdownMenuItem(value: 2500, child: Text('2500')),
+                    DropdownMenuItem(value: 3000, child: Text('3000')),
+                    DropdownMenuItem(value: 5000, child: Text('5000')),
+                    DropdownMenuItem(value: 10000, child: Text('10000')),
+                  ],
+                  onChanged: (v) => setSt(() => fixedScale = v ?? 3000),
+                ),
+              ),
+              const SizedBox(width: 16),
+              const Text('杆路线宽(mm)',
+                  style: TextStyle(color: kTextMain, fontSize: 13)),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 80,
+                child: TextFormField(
+                  initialValue: rodWidthMm.toString(),
+                  style: const TextStyle(color: kTextMain, fontSize: 13),
+                  decoration: dec('0.5'),
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  onChanged: (v) =>
+                      rodWidthMm = double.tryParse(v.trim()) ?? 0.5,
+                ),
+              ),
+            ]),
+          ),
+          CheckboxListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: const Text('符号上方写名称（关＝只留图块，块中间干净）',
+                style: TextStyle(color: kTextMain, fontSize: 13)),
+            value: showNames,
+            activeColor: kAccent,
+            onChanged: (v) => setSt(() => showNames = v ?? false),
           ),
           CheckboxListTile(
             dense: true,
@@ -1383,6 +1452,10 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
         prefs.setBool('dxfTdtFallback', tdtFallback);
         prefs.setBool('dxfUseLocal', useLocal);
         prefs.setDouble('dxfRangeM', rangeM);
+        // 出图口径：记住比例 / 线宽 / 是否写名称
+        prefs.setInt('dxfFixedScale', fixedScale);
+        prefs.setDouble('dxfRodWidthMm', rodWidthMm);
+        prefs.setBool('dxfShowNames', showNames);
         toast(context, '正在生成 DXF…');
         try {
           final corridor =
@@ -1415,6 +1488,10 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
             refreshBasemap: refreshBasemap,
             // 本地开源矢量底图（离线优先）；未勾选则走缓存/联网抓取。
             localBasemap: (surroundings && useLocal) ? localBm : null,
+            // 出图口径（用户指定）：固定比例、杆路线宽、是否写名称
+            fixedScale: fixedScale,
+            rodLineWidthMm: rodWidthMm,
+            showLabelNames: showNames,
           );
           if (context.mounted) {
             // 非致命警告 / 底图三态结构化说明（文件仍正常分享）
@@ -1978,6 +2055,110 @@ Future<void> showOverpassEndpointsDialog(BuildContext context, AppState st) asyn
                 ? '已清空，恢复使用内置 Overpass 镜像'
                 : '已保存 ${items.length} 个自定义端点，底图抓取将优先使用');
       }),
+    ],
+  );
+}
+
+// ================= 地图标签外观 =================
+
+/// 「地图标签颜色」：选一个颜色，地图上所有符号本体立刻跟着变。
+///
+/// 用户口径："地图标签的颜色可以设置"。只影响**地图渲染**——
+/// 出图（DXF）有独立的图层色规范，不受这里影响。
+///
+/// 「跟随类型」= 清除自定义色，恢复每个符号类型自带的颜色
+/// （杆紫、井青、箱绿……），这在需要一眼分辨类型时更好用。
+Future<void> showLabelColorDialog(BuildContext context, AppState st) {
+  // 常用色板：足够覆盖"在卫星图/街道图上都要看得清"的场景。
+  const presets = <String, int>{
+    '类型默认': 0,
+    '深灰（线稿感）': 0xFF37474F,
+    '黑': 0xFF000000,
+    '红': 0xFFD32F2F,
+    '橙': 0xFFEF6C00,
+    '黄': 0xFFF9A825,
+    '绿': 0xFF2E7D32,
+    '青': 0xFF00838F,
+    '蓝': 0xFF1565C0,
+    '紫': 0xFF6A1B9A,
+    '粉': 0xFFAD1457,
+    '白': 0xFFFFFFFF,
+  };
+
+  return showDarkDialog(
+    context,
+    title: '地图标签颜色',
+    content: SizedBox(
+      width: 420,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '只改地图上的符号颜色；导出的 DXF 走自己的图层色规范，不受影响。',
+            style: TextStyle(color: kTextSub, fontSize: 12, height: 1.5),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final e in presets.entries)
+                InkWell(
+                  onTap: () {
+                    st.setLabelColor(e.value);
+                    Navigator.pop(context);
+                    toast(context, e.value == 0
+                        ? '已恢复「跟随符号类型」的颜色'
+                        : '标签颜色已改为「${e.key}」');
+                  },
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    width: 118,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 9),
+                    decoration: BoxDecoration(
+                      color: TokC.field,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: st.labelColor == e.value
+                            ? kAccent
+                            : TokC.divider,
+                        width: st.labelColor == e.value ? 1.6 : 0.6,
+                      ),
+                    ),
+                    child: Row(children: [
+                      Container(
+                        width: 16,
+                        height: 16,
+                        decoration: BoxDecoration(
+                          // 0 = 类型默认：用灰白渐变示意"不固定"
+                          color: e.value == 0
+                              ? const Color(0xFFB0BEC5)
+                              : Color(e.value),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                              color: const Color(0x33000000), width: 0.8),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(e.key,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                color: kTextMain, fontSize: 12)),
+                      ),
+                    ]),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      darkTextBtn('关闭', () => Navigator.pop(context), color: kTextSub),
     ],
   );
 }

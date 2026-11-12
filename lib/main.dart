@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import 'models/label_type.dart';
+import 'export/bundled_basemap.dart';
 import 'services/platform_caps.dart';
 import 'state/app_state.dart';
 import 'symbols/symbol_catalog.dart';
@@ -28,6 +29,10 @@ void main(List<String> args) {
   }
   // 图例库（assets/dxf/lispblock.dxf）灌进符号表：启动即装，不等 UI。
   unawaited(_bootstrapSymbolCatalog());
+  // 启用内置兜底底图（信阳矢量，随包 21MB）：现场没信号时 Overpass/高德
+  // 抓不到数据，出图就是空白背景。这里只打开开关，真正的 21MB 解压
+  // 是**惰性**的（首次需要兜底时才加载），不拖慢启动。
+  BundledBasemap.enabled = true;
   runApp(OviMapApp(startupProjectPath: startupProjectFromArgs(args)));
 }
 

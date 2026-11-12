@@ -328,6 +328,29 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ================= 地图标签外观（用户可配） =================
+
+  /// 地图标签颜色（ARGB，0 = 用类型自带色）。
+  ///
+  /// 用户口径："地图标签的颜色可以设置"。只影响**地图渲染**，
+  /// 不改 DXF（出图有独立的图层色规范，见 dxf_layers.dart）。
+  static const prefLabelColor = 'mapLabelColor';
+
+  int get labelColor => prefs.getInt(prefLabelColor) ?? 0;
+
+  /// 当前标签颜色（null = 用类型自带色），供渲染层直接用。
+  Color? get labelColorOrNull =>
+      labelColor == 0 ? null : Color(labelColor);
+
+  void setLabelColor(int argb) {
+    if (argb == 0) {
+      prefs.remove(prefLabelColor);
+    } else {
+      prefs.setInt(prefLabelColor, argb);
+    }
+    notifyListeners();
+  }
+
   /// 高德 Web 服务 key（第二十批新增，偏好键 `amapKey`）。
   ///
   /// **有内置 key（开箱即用）**：用户未配置自己的 key 时，[amapKey] 回退到

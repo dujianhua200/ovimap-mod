@@ -375,7 +375,12 @@ void main() {
         expect(song!.first('3'), 'simsun.ttc', reason: '${v.name}: SongTi 字体文件');
         final simsun = doc.styleByName('SimSun');
         expect(simsun, isNotNull, reason: '${v.name}: 既有 SimSun 样式不得删');
-        expect(simsun!.first('3'), 'SimSun.ttf');
+        // v3.11：字体文件名统一为 simsun.ttc。
+        // 原来写 SimSun.ttf —— 那个文件名在 Windows/CAD 里根本不存在
+        // （宋体实际是 simsun.ttc），CAD 找不到就回退到默认字体，
+        // 这就是用户说的"导出的字体看着难受"。
+        expect(simsun!.first('3'), 'simsun.ttc',
+            reason: '${v.name}: SimSun 应指向真实存在的 simsun.ttc');
 
         for (final t in doc.on('TEXT', 'DaoLu')) {
           expect(t.first('7'), 'SongTi', reason: '${v.name}: 路名一律 SongTi');

@@ -6,6 +6,7 @@ import '../models/map_label.dart';
 import '../services/amap.dart';
 import '../services/store.dart';
 import '../services/tianditu.dart';
+import 'bundled_basemap.dart';
 import 'overpass.dart';
 
 // ===================== 数据模型 =====================
@@ -756,14 +757,95 @@ class BasemapFetcher {
       placesReport = places.report;
     }
 
+    // ---------------------------------------------------------------
+    // **内置兜底底图**（离线，随包 21MB）
+    //
+    // 现场没信号时 Overpass/高德/天地图全都拿不到数据，出图就是空白背景。
+    // 这里在"网络结果为空 / 失败"时补上随包的信阳矢量数据。
+    //
+    // 只在**确实缺数据**时补：联网已经抓到的东西优先（用户口径
+    // "抓取什么样子就什么样子"），避免内置旧数据覆盖新数据。
+    // ---------------------------------------------------------------
+    var roadsOut = roads.items;
+    var buildingsOut = buildings.items;
+    var placesOut = places.items;
+    var roadsReport = roads.report;
+    var bldReport = buildings.report;
+
+    if (BundledBasemap.enabled) {
+      final needRoads = roadsOut.isEmpty &&
+          roadsReport.state != FetchState.cached;
+      final needBld = buildingsOut.isEmpty;
+      final needPlaces = placesOut.isEmpty;
+      if ((needRoads || needBld || needPlaces) &&
+          BundledBasemap.covers(bbox[0], bbox[1], bbox[2], bbox[3])) {
+        try {
+          final bundled = await BundledBasemap.instance;
+          if (needRoads && bundled.roadsLoaded) {
+            final br = bundled.roadsIn(bbox[0], bbox[1], bbox[2], bbox[3]);
+            if (br.isNotEmpty) {
+              roadsOut = [
+                for (final r in br)
+                  RoadPoly(
+                    r.pts,
+                    OverpassClient.gradeOf(r.highway),
+                    r.name,
+                  ),
+              ];
+              roadsReport = DatasetReport(
+                FetchState.ok,
+                source: '${roadsReport.source}+内置',
+                count: roadsOut.length,
+              );
+            }
+          }
+          if (needBld && bundled.buildingsLoaded) {
+            final rings = bundled.buildingsIn(bbox[0], bbox[1], bbox[2], bbox[3]);
+            if (rings.isNotEmpty) {
+              buildingsOut = [
+                for (final ring in rings) BuildingPoly([ring], '内置兜底')
+              ];
+              bldReport = DatasetReport(
+                FetchState.ok,
+                source: '${bldReport.source}+内置',
+                count: buildingsOut.length,
+              );
+            }
+          }
+          if (needPlaces && bundled.placesLoaded) {
+            final bp = bundled.placesIn(bbox[0], bbox[1], bbox[2], bbox[3]);
+            if (bp.isNotEmpty) {
+              placesOut = [
+                for (final p in bp)
+                  PlaceFeature(
+                    name: p.name,
+                    lat: p.lat,
+                    lon: p.lon,
+                    level: PlaceLevel.village,
+                    isArea: false,
+                  ),
+              ];
+              placesReport = DatasetReport(
+                FetchState.ok,
+                source: '${placesReport.source}+内置',
+                count: placesOut.length,
+              );
+            }
+          }
+        } catch (_) {
+          // 内置数据读不出来（资源缺失/解压失败）不应阻断导出。
+        }
+      }
+    }
+
     return BasemapData(
-      roads: roads.items,
-      buildings: buildings.items,
+      roads: roadsOut,
+      buildings: buildingsOut,
       extras: extras.items,
-      places: places.items,
+      places: placesOut,
       report: BasemapFetchReport(
-        roads: roads.report,
-        buildings: buildings.report,
+        roads: roadsReport,
+        buildings: bldReport,
         places: placesReport,
         extras: extras.report,
       ),

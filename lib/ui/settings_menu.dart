@@ -39,6 +39,7 @@ Future<void> showSettingsMenu(
           sheetTile(context, 'Overpass 端点（底图数据源）',
               () => showOverpassEndpointsDialog(context, st)),
           sheetTile(context, '离线地图（出行前预下载）', onOffline),
+          sheetTile(context, '地图标签颜色', () => showLabelColorDialog(context, st)),
           sheetGroupTitle('云同步'),
           sheetTile(
               context,

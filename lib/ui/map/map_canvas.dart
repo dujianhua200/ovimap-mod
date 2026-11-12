@@ -678,11 +678,37 @@ List<Polyline> buildTopoLines(AppState st) {
   ];
 }
 
+/// 标签随 zoom 的缩放倍率（16 级 = 1.0 倍）。
+///
+/// 每放大一级 ×1.25（2^0.32），夹在 [0.45, 3.2]：
+/// · 下限保证远景仍能看见符号；
+/// · 上限避免近景标签糊满屏幕、把地物挡住。
+/// 是**纯函数**，便于单测断言单调性与边界。
+double labelScaleForZoomForTest(double zoom) => _labelScaleForZoom(zoom);
+
+double _labelScaleForZoom(double zoom) {
+  const anchor = 16.0;
+  final raw = math.pow(1.25, zoom - anchor).toDouble();
+  if (raw < 0.45) return 0.45;
+  if (raw > 3.2) return 3.2;
+  return raw;
+}
+
 /// 业务符号标记（可见收藏 → 草稿 → 拓扑选中 → 测量点）。供两套壳注入。
 List<Marker> buildBusinessMarkers(AppState st, MapCamera cam,
     {required bool mapReady}) {
   final markers = <Marker>[];
   if (!mapReady) return markers;
+
+  /// 标签随缩放等比缩放。
+  ///
+  /// 用户口径："缩放的时候，地图的标签也跟着缩放"。
+  /// 做法：以 zoom 16 为"1 倍"基准，每放大一级 ×1.25（= 2^0.32，
+  /// 视觉上跟得上瓦片放大而不至于喧宾夺主），夹在 0.45~3.2 之间：
+  /// 缩太小时不至于看不见，放大时不至于糊满屏幕。
+  /// 注意 Marker 的 width/height 必须**同步**乘 scale，否则图标会被裁掉。
+  final scale = _labelScaleForZoom(cam.zoom);
+  final base = LabelSymbol.symbolSize * scale;
 
   void addFor(MapLabel l,
       {bool selected = false, bool draft = false, bool batchSel = false}) {
@@ -693,11 +719,14 @@ List<Marker> buildBusinessMarkers(AppState st, MapCamera cam,
     final child = LabelSymbol(
       label: skipName ? (l.clone()..name = '') : l,
       selected: selected || batchSel,
+      scale: scale,
+      // 用户可配的标签颜色（null=默认色）。
+      overrideColor: st.labelColorOrNull,
     );
     markers.add(Marker(
       point: LatLng(d[0], d[1]),
-      width: LabelSymbol.symbolSize,
-      height: LabelSymbol.symbolSize,
+      width: base,
+      height: base,
       alignment: Alignment.center,
       child: child,
     ));

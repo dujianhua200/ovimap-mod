@@ -133,6 +133,20 @@ class DxfExporter {
     int localBasemapFeatureCap =
         GeoJsonImporter.defaultFeatureCap, // 本地底图要素数上限（防御性兜底）
     String segPrefix = '', // 段标前缀（如 埋／架）：空串=仅数字；透传自 AppState.segPrefix
+    // —— 出图口径（用户指定）——
+    /// 固定出图比例（1:3000 即传 3000）；null = 按范围自动估算（旧行为）。
+    ///
+    /// 现场口径：勘察图统一 1:3000，所有字高/符号/线宽都按这个比例换算成
+    /// 图纸米数。自动估算会随线路长度变化（同一段路画两次比例不同），
+    /// 交付时对不上，所以默认改为**固定**。
+    int? fixedScale,
+    /// 杆路多段线的全局宽度（纸面毫米）。用户指定 0.5mm。
+    double rodLineWidthMm = 0.5,
+    /// 是否在符号上方写「名称」。
+    ///
+    /// 关掉后只留图块本体（图例块内已含代号字，如 gl004 里的「木」），
+    /// 不再额外压一行名称 —— 用户口径："块中间没有连线，没有原字"。
+    bool showLabelNames = true,
   }) async {
     final warnings = <String>[];
     final dir = await LabelStore.instance.exportDir();
@@ -215,7 +229,11 @@ class DxfExporter {
 
     // 图幅比例：**只按线路范围估算**（不被过大的底图外扩拖大），
     // 用于所有底图线宽/字号的「纸面毫米 → 图纸米」换算，图签亦报此比例（N5 修正）。
-    final routeScale = _pickScale(extMinX, extMinY, extMaxX, extMaxY);
+    // 出图比例：用户可固定（现场统一 1:3000），否则按线路范围自动估算。
+    // 固定后所有"纸面毫米"换算（字高/符号/线宽/偏移）都跟着走，不再随线路长度漂移。
+    final routeScale = fixedScale != null && fixedScale > 0
+        ? fixedScale
+        : _pickScale(extMinX, extMinY, extMaxX, extMaxY);
     // 字高按**纸面毫米**换算（v3.9.5）：此前直接写 2.5/3 被当作 2.5 米，
     // 图上极其巨大。用户要求：距离 2.5mm（宋体），其余与它和谐匹配。
     final segFontM = _mmOf(2.5, routeScale);
@@ -312,12 +330,20 @@ class DxfExporter {
       ];
       if (corridorWidth > 0) _appendCorridor(c, cart, corridorWidth, version);
 
+      // 杆路 = **多段线**（不是逐段 LINE），且**在每个符号处断开**。
+      //
+      // 用户口径："线是多段线，宽度 0.5 毫米；块中间没有连线"。
+      // 断开的必要性：符号（图块）本身有尺寸（杆 3.1mm、井 4.1mm、拉线 10mm），
+      // 若整条线从符号中心穿过，在 CAD 里放大看就是"一根棍子捅穿符号" ——
+      // 现场叫"块中间有连线"。所以按符号**实际半宽**把该段两端各缩进，
+      // 线只画到符号边缘为止。
+      final lineWidthM = _mmOf(rodLineWidthMm, routeScale);
+      _appendRodPolyline(c, chain, cart, routeScale, lineWidthM, version);
+
       var chainCum = globalCum;
       for (var i = 1; i < chain.length; i++) {
         final a = chain[i - 1];
         final b = chain[i];
-        _appendLine(c, 'GanLu', cart[i - 1][0], cart[i - 1][1],
-            cart[i][0], cart[i][1]);
 
         final mx = (cart[i - 1][0] + cart[i][0]) / 2;
         final my = (cart[i - 1][1] + cart[i][1]) / 2;
@@ -407,9 +433,10 @@ class DxfExporter {
           // 图例块自身单位是"纸面毫米 @1:1"，与预置符号同口径 → 同一个 symScale。
           // 对齐靠块定义的基点（_blockBaseOf），插入点即地图点。
           _appendInsert(c, 'BiaoQian', lt.id, x, y, sx: symScale, sy: symScale);
-          // 名称：图块本体只含图例里那一个代号字（如 gl004 里的"木"），
-          // 出图时还必须能看出"哪一根 / 什么规格"——名称照样写在符号上方。
-          if (disp.isNotEmpty) {
+          // 名称（可关）：图块本体只含图例里那一个代号字（如 gl004 里的「木」）。
+          // 用户口径「块中间没有连线，没有原字」→ showLabelNames=false 时
+          // 不再额外压一行名称，只留图块本身。
+          if (showLabelNames && disp.isNotEmpty) {
             final top = (b.maxY - _blockBaseY(b)) * symScale;
             _text(c, 'BiaoQian', x, y + top + _mmOf(1.2, routeScale),
                 labelFontM, disp, style: true);
@@ -629,6 +656,120 @@ class DxfExporter {
       }
       c.sb.write('0\nSEQEND\n8\n$layer\n');
     }
+  }
+
+  /// 杆路多段线：按符号实际尺寸**在符号处断开**。
+  ///
+  /// ## 为什么要断开
+  /// 用户口径："块中间没有连线"。图块是有尺寸的（杆 3.1mm、井 4.1mm、
+  /// 拉线 10mm、警示牌 15mm），整条线从符号中心穿过去，在 CAD 里就是
+  /// "一根棍子捅穿符号"。所以每段线两端各缩进一个**符号半宽**，
+  /// 线只画到符号边缘。
+  ///
+  /// ## 为什么仍是一条多段线
+  /// 断开后如果逐段写 LINE，CAD 里选中就是一堆碎线（用户明确要"多段线"）。
+  /// 这里把断开后的若干**子折线**各自写成一条 POLYLINE —— 每条都是真多段线，
+  /// 且都带全局线宽。
+  ///
+  /// ## 尺寸口径
+  /// 符号是"纸面毫米"，地面米数 = mm / 1000 × 出图比例，
+  /// 与 `simScale`/字高完全同口径，保证任何比例下断开量与符号一致。
+  static void _appendRodPolyline(
+    _Ctx c,
+    List<MapLabel> chain,
+    List<List<double>> cart,
+    int routeScale,
+    double widthM,
+    DxfVersion version,
+  ) {
+    // 每个点的"断开半径"（地面米）：符号半宽，至少留 0.4mm 空隙。
+    final radius = <double>[];
+    for (final l in chain) {
+      final halfMm = _symbolHalfSpanMm(l);
+      radius.add(_mmOf(halfMm <= 0 ? 0.4 : halfMm, routeScale));
+    }
+
+    // 逐段生成"可见子段"（两端各缩进），再把首尾相接的子段合并成折线。
+    final runs = <List<List<double>>>[];
+    List<List<double>>? cur;
+    var swallowed = 0; // 被符号完全覆盖（不画线）的段数
+    for (var i = 0; i < cart.length - 1; i++) {
+      final p0 = cart[i], p1 = cart[i + 1];
+      final dx = p1[0] - p0[0], dy = p1[1] - p0[1];
+      final len = math.sqrt(dx * dx + dy * dy);
+      if (len <= 1e-9) continue;
+      final ux = dx / len, uy = dy / len;
+      var t0 = radius[i]; // 起点缩进
+      var t1 = len - radius[i + 1]; // 终点缩进
+      if (t1 <= t0) {
+        // 两符号几乎重合：这一段完全被符号盖住 → 不画。
+        // 仍要收尾当前 run，避免把不相邻的段连成一条。
+        swallowed++;
+        if (cur != null && cur.length >= 2) runs.add(cur);
+        cur = null;
+        continue;
+      }
+      final a = [p0[0] + ux * t0, p0[1] + uy * t0];
+      final b = [p0[0] + ux * t1, p0[1] + uy * t1];
+      if (cur == null) {
+        cur = [a, b];
+      } else {
+        // 与上一子段首尾相接（中间只隔着一个符号）→ 继续同一条折线。
+        final last = cur.last;
+        if ((last[0] - a[0]).abs() < 1e-6 && (last[1] - a[1]).abs() < 1e-6) {
+          cur.add(b);
+        } else {
+          if (cur.length >= 2) runs.add(cur);
+          cur = [a, b];
+        }
+      }
+    }
+    if (cur != null && cur.length >= 2) runs.add(cur);
+
+    // 兜底：整条链全被符号覆盖，但**各点确实分开**（不是重合）时才补一条
+    // 符号中心之间的连线。
+    //
+    // 为什么要区分"重合"与"符号覆盖"：
+    // · 多点重合（现场误点两次）→ 净跨度为 0，图上一根线都没有才正确，
+    //   强行画一条零长线反而制造垃圾实体；
+    // · 点确实分开、只是符号尺寸把它们之间的空隙吃掉了（比例小/符号大）→
+    //   杆路存在这件事必须看得见，否则用户以为"点没连上"。
+    if (runs.isEmpty && swallowed > 0) {
+      final distinct = <List<double>>[];
+      for (final p in cart) {
+        final dup = distinct.any((q) =>
+            (q[0] - p[0]).abs() < 1e-9 && (q[1] - p[1]).abs() < 1e-9);
+        if (!dup) distinct.add(p);
+      }
+      if (distinct.length >= 2) {
+        _appendPolyline(c, 'GanLu', distinct,
+            width: widthM, version: version);
+      }
+    }
+
+    for (final run in runs) {
+      _appendPolyline(c, 'GanLu', run, width: widthM, version: version);
+    }
+  }
+
+  /// 符号在纸面上的**半宽**（毫米）：用于杆路在符号处断开的缩进量。
+  ///
+  /// 取值优先用图块真实包络（`DxfBlock` 的 width/height），预置符号按
+  /// 各形状的固定尺寸给（与 `_appendBlocksSection` 里定义的块尺寸一致）。
+  /// 返回 0 表示"该点不画符号"（轨迹/无标签/文字），调用方退化为 0.4mm 空隙。
+  static double _symbolHalfSpanMm(MapLabel l) {
+    final lt = l.type;
+    if (lt.id == 'track' || lt.id == 'none' || lt.id == 'text') return 0;
+    final b = lt.block;
+    if (b != null && !b.isEmpty) {
+      // 图块单位即纸面毫米 → 半宽 = max(宽,高)/2
+      return b.maxSide / 2;
+    }
+    // 预置符号：与块定义尺寸对齐（人孔 6×3.5 / 箱体 5×3 / 引上 3 / 杆 r=1.2）
+    if (lt.isOval) return 3.0; // HZ_OVAL 半宽
+    if (lt.isBox) return 2.5; // HZ_BOX 半宽
+    if (lt.isTri) return 1.5; // HZ_TRI 半宽
+    return 1.2; // HZ_POLE 半径
   }
 
   /// 管廊双线：整链一条闭合偏移多段线（转角用平均法向自然对接，
@@ -1448,7 +1589,7 @@ class DxfExporter {
       c.sb.write('0\nSTYLE\n5\n${c.h.next()}\n330\n$styleTableH\n'
           '100\nAcDbSymbolTableRecord\n100\nAcDbTextStyleTableRecord\n'
           '2\nSimSun\n70\n0\n40\n0\n41\n1\n50\n0\n71\n0\n42\n3\n'
-          '3\nSimSun.ttf\n4\n\n');
+          '3\nsimsun.ttc\n4\n\n');
       // 路名专用宋体样式（ASCII 样式名避免编码问题；fontFile=宋体 simsun.ttc）。
       // 仅 DaoLu 层路名 TEXT 引用，其他文字样式保持不变。
       c.sb.write('0\nSTYLE\n5\n${c.h.next()}\n330\n$styleTableH\n'
@@ -1463,7 +1604,7 @@ class DxfExporter {
       }
       c.sb.write('0\nENDTAB\n');
       c.sb.write('0\nTABLE\n2\nSTYLE\n70\n2\n');
-      c.sb.write('0\nSTYLE\n2\nSimSun\n70\n0\n40\n0\n41\n1\n50\n0\n71\n0\n42\n3\n3\nSimSun.ttf\n4\n\n');
+      c.sb.write('0\nSTYLE\n2\nSimSun\n70\n0\n40\n0\n41\n1\n50\n0\n71\n0\n42\n3\n3\nsimsun.ttc\n4\n\n');
       c.sb.write('0\nSTYLE\n2\nSongTi\n70\n0\n40\n0\n41\n1\n50\n0\n71\n0\n42\n3\n3\nsimsun.ttc\n4\n\n');
       c.sb.write('0\nENDTAB\n0\nENDSEC\n');
     }

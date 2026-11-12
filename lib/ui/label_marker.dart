@@ -16,11 +16,18 @@ class LabelSymbol extends StatelessWidget {
   final bool selected;
   final double scale;
 
+  /// 用户可配的标签颜色（null = 用类型自带色）。
+  ///
+  /// 用户口径："地图标签的颜色可以设置"。只有**符号本体**跟着变，
+  /// 名称文字仍用白字黑描边 —— 那是为了在任何底图上都读得出来。
+  final Color? overrideColor;
+
   const LabelSymbol({
     super.key,
     required this.label,
     this.selected = false,
     this.scale = 1.0,
+    this.overrideColor,
   });
 
   static const double symbolSize = 28;
@@ -36,7 +43,8 @@ class LabelSymbol extends StatelessWidget {
     if (lt.id == 'area') {
       return CustomPaint(
         size: Size(8 * scale, 8 * scale),
-        painter: _DotPainter(color: lt.color, selected: selected),
+        painter: _DotPainter(
+            color: overrideColor ?? lt.color, selected: selected),
       );
     }
 
@@ -77,7 +85,10 @@ class LabelSymbol extends StatelessWidget {
               padding: const EdgeInsets.all(2),
               child: DxfBlockThumb(
                 block: lt.block!,
-                color: selected ? const Color(0xFF0288D1) : const Color(0xFF263238),
+                // 用户可配颜色；未配置时用深灰（线稿观感）。
+                color: selected
+                    ? const Color(0xFF0288D1)
+                    : (overrideColor ?? const Color(0xFF263238)),
                 strokeWidth: selected ? 1.6 : 1.2,
               ),
             ),
@@ -108,6 +119,7 @@ class LabelSymbol extends StatelessWidget {
               type: lt,
               symbol: disp,
               selected: selected,
+              overrideColor: overrideColor,
             ),
           ),
           if (label.name.trim().isNotEmpty)
@@ -156,9 +168,13 @@ class _ShapePainter extends CustomPainter {
   final LabelType type;
   final String symbol;
   final bool selected;
+  final Color? overrideColor;
 
   _ShapePainter(
-      {required this.type, required this.symbol, required this.selected});
+      {required this.type,
+      required this.symbol,
+      required this.selected,
+      this.overrideColor});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -168,11 +184,11 @@ class _ShapePainter extends CustomPainter {
     if (selected) {
       canvas.drawCircle(c, w / 2 + 2, Paint()..color = const Color(0xFFFFD740));
     }
-    // 阴影
-    canvas.drawCircle(Offset(c.dx + 0.8, c.dy + 1.2), w / 2 - 2,
-        Paint()..color = const Color(0x55000000));
+    // 注：这里原本画了一个半透明黑色**阴影圆**，视觉上像给每个标签套了个
+    // 黑圈（用户反馈"标签不要连线/不要圈"）。阴影在深色卫星图上反而更糊，
+    // 现改为不画 —— 符号本体 + 白色描边已足够从底图上分辨。
 
-    final fill = Paint()..color = type.color;
+    final fill = Paint()..color = overrideColor ?? type.color;
     final stroke = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.8
@@ -230,7 +246,10 @@ class _ShapePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_ShapePainter old) =>
-      old.type != type || old.symbol != symbol || old.selected != selected;
+      old.type != type ||
+      old.symbol != symbol ||
+      old.selected != selected ||
+      old.overrideColor != overrideColor;
 }
 
 /// 白字黑边文本（地图标注）。
