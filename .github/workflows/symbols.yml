@@ -82,16 +82,9 @@ jobs:
           fi
 
       - name: 符号单测（解析 / 目录 / 导出 / UI）
-        # flutter_tester 收尾偶发崩溃（已知，非本仓库代码问题），至多重试一次。
-        run: |
-          flutter test test/lispblock_symbols_test.dart \
-                       test/lispblock_ui_test.dart \
-                       test/lispblock_ezdxf_strict_test.dart \
-            && exit 0
-          echo "::warning::第一次运行非零退出，重试一次"
-          flutter test test/lispblock_symbols_test.dart \
-                       test/lispblock_ui_test.dart \
-                       test/lispblock_ezdxf_strict_test.dart
+        # 与其他流水线同口径：逐文件独立进程（脚本会自动遍历 test/*_test.dart），
+        # 避免跨文件静态状态残留；--retry 只吸收 flutter_tester 收尾崩溃。
+        run: bash scripts/run_tests_isolated.sh --retry
 
       - name: 安装 ezdxf（第三方 DXF 引擎）
         run: |

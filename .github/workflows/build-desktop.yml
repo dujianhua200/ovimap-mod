@@ -90,16 +90,20 @@ jobs:
         run: flutter analyze --no-fatal-infos
 
       - name: 单元测试（门禁）
-        # flutter_tester 收尾偶发崩溃（用例全绿却 exit 1，三平台都遇到过；
-        # v3.7.1 Windows 连续两次 591 全绿仍 exit 1 即此症状）：
-        # 至多重试一次，重试后仍挂才让门禁红。**禁止**改成 `|| true`。
+        # 逐文件独立进程运行（scripts/run_tests_isolated.sh）。
+        #
+        # 为什么不用 `flutter test [-j 1]`：
+        #   本项目大量用例依赖**进程级静态状态**（AppPaths._cache/_force、
+        #   LabelStore 单例、BasemapCache 磁盘缓存、path_provider 的
+        #   platform instance）。`-j 1` 只是串行，所有文件仍在同一进程里，
+        #   状态照样残留 —— 实测 CI 上表现为"全绿用例数每次都不一样"
+        #   （611 → 609，1 个莫名失败且详情不落日志）。
+        #   一文件一进程后状态天然清零，结果可复现。
+        #
+        # --retry 只吸收"用例全绿但进程非零退出"的 flutter_tester 收尾崩溃
+        # （三平台都遇到过），**不会**吞掉真实的用例失败。
         shell: bash
-        run: |
-          # Windows 特有：并发跑测试文件时，「缓存/落盘」类重用例偶发命中
-          # 彼此写下的缓存（实测 Actual 读到缓存 JSON），macOS 因核数不同
-          # 侥幸不受影响。这里串行执行（-j 1）消除跨文件共享磁盘缓存的竞态；
-          # 仍然保留「至多一次重试」吸收 flutter_tester 收尾崩溃。
-          flutter test -j 1 || flutter test -j 1
+        run: bash scripts/run_tests_isolated.sh --retry
 
       - name: 启用 Windows 桌面支持
         run: flutter config --enable-windows-desktop
@@ -212,18 +216,14 @@ jobs:
         run: flutter analyze --no-fatal-infos
 
       - name: 单元测试（门禁）
-        # flutter_tester 收尾偶发崩溃（用例全绿却 exit 1，三平台都遇到过；
-        # v3.7.1 Windows 连续两次 591 全绿仍 exit 1 即此症状）：
-        # 至多重试一次，重试后仍挂才让门禁红。**禁止**改成 `|| true`。
+        # 与 Windows 任务同一口径：逐文件独立进程（scripts/run_tests_isolated.sh）。
         #
-        # ⚠️ macOS 必须 `-j 1` 串行（与 Windows 同步）：
-        # 实测 v3.10.0 在 macos runner（多核）上默认并行跑，两次都在收尾
+        # v3.10.0 首次尝试时 macOS 用 `flutter test`（并发）在收尾连续两次
         # `TestDeviceException(Shell subprocess crashed with segmentation fault)`，
-        # 且每次"全绿"的用例数还不一样（615 / 618）——典型的并发收尾崩溃，
-        # 不是用例失败。串行后稳定。
+        # 且"全绿"用例数每次不同（615 / 618）——并发 + 静态状态残留的典型症状。
+        # 一文件一进程后两者一起消失。
         shell: bash
-        run: |
-          flutter test -j 1 || flutter test -j 1
+        run: bash scripts/run_tests_isolated.sh --retry
 
       - name: 启用 macOS 桌面支持
         run: flutter config --enable-macos-desktop

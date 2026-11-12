@@ -64,13 +64,12 @@ jobs:
         run: flutter analyze --no-fatal-infos
 
       - name: 单元测试（门禁）
-        # 已知偶发缺陷（不是我们代码的问题）：flutter_tester 在收尾阶段 segfault，
-        # 表现为「用例全绿、汇总却有 4 条没算上、进程 exit 1」，日志里一条报错都没有。
-        # macOS 与 Linux 都实测到过；同一提交直接重跑即绿（见 docs/BUILD-cloud.md §5.6）。
+        # 逐文件独立进程（scripts/run_tests_isolated.sh）。
         #
-        # 这里做「至多一次」重试：确定性失败会连续两次都红，仍然拦得住；
-        # 只有这种偶发崩溃会被吸收掉。**不要**改成 `flutter test || true` —— 那才是掩盖问题。
-        run: |
-          flutter test && exit 0
-          echo "::warning::第一次运行非零退出 —— 若是已知的 flutter_tester 收尾偶发崩溃，重试一次；若两次都红则是真失败"
-          flutter test
+        # 此前用 `flutter test` 并发跑，已知两类噪声：
+        #   ① flutter_tester 收尾 segfault（用例全绿、进程 exit 1、日志无报错）；
+        #   ② 跨文件静态状态残留（AppPaths 缓存 / 单例 / 磁盘缓存），
+        #      表现为"通过用例数每次不一样 + 1 个莫名失败且无详情"。
+        # 一文件一进程把 ①② 一起消掉；--retry 只吸收 ①（用例全绿却非零退出），
+        # **不会**吞掉真实失败。禁止改成 `flutter test || true`。
+        run: bash scripts/run_tests_isolated.sh --retry
