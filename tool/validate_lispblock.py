@@ -9,6 +9,7 @@ AutoCAD / GstarCAD 同样有风险。本项目历史上正是被字符串断言�
 """
 
 import glob
+import os
 import sys
 
 import ezdxf
@@ -42,24 +43,28 @@ def check(path):
         for f in auditor.fixes:
             buf.append('audit fix: %s' % (f.message,))
 
-    # 3) 块定义：导出的图例块必须真的存在于 BLOCKS 表
+    # 3) 块定义 vs INSERT：**按文件实际内容**核对，不预设固定块名。
+    #
+    # 早期这里硬编码要求 {gl001, gx005_x, lx001} 三个块 —— 那是当时
+    # 那份样本恰好用了这三种。后来 dxf_output_spec_test 产出的样本只用 gl001，
+    # 校验就误报"缺少块定义"。正确口径是：**每一个被 INSERT 的块都必须在
+    # BLOCKS 表里有定义**（否则 CAD 打开就是空引用）。
     block_names = {b.name for b in doc.blocks}
-    expected = {'gl001', 'gx005_x', 'lx001'}
-    missing = expected - block_names
-    if missing:
-        buf.append('缺少块定义：%s（现有 %s）' % (sorted(missing), sorted(block_names)))
-
-    # 4) 实体段里必须有对这些块的 INSERT（图例栏 + 图上符号）
     msp = doc.modelspace()
     inserted = {}
     for e in msp:
         if e.dxftype() == 'INSERT':
             inserted[e.dxf.name] = inserted.get(e.dxf.name, 0) + 1
-    for name in expected:
-        if inserted.get(name, 0) == 0:
-            buf.append('实体段没有 INSERT %s' % name)
 
-    # 5) 版本相关硬约束：R12 不许出现 R2000 专有实体
+    if not inserted:
+        buf.append('实体段没有任何 INSERT（符号功能未生效？）')
+
+    # 每个被引用的块都要有定义；内置 HZ_* 与图例块同理。
+    undefined = sorted(n for n in inserted if n not in block_names)
+    if undefined:
+        buf.append('INSERT 引用了未定义的块：%s' % undefined)
+
+    # 版本相关硬约束：R12 不许出现 R2000/2007 专有实体
     ver = doc.dxfversion
     if ver == 'AC1009':
         bad = [e.dxftype() for e in msp
@@ -68,7 +73,7 @@ def check(path):
             buf.append('R12 里出现 2007 专有实体：%s' % sorted(set(bad)))
 
     print('%-28s ver=%-7s blocks=%-4d inserts=%s %s'
-          % (path.split('/')[-1].split('\\')[-1], ver, len(block_names),
+          % (os.path.basename(path), ver, len(block_names),
              dict(sorted(inserted.items())), 'OK' if not buf else 'FAIL'))
     problems.extend(buf)
     return problems

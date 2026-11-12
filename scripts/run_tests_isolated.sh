@@ -43,23 +43,25 @@ echo "=================================================="
 
 # 判定"是否为收尾阶段的非断言失败"（而不是真实的用例失败）。
 #
-# 两类已知噪声，都会让**全绿**的用例被判红：
+# 三类已知噪声，都会让**全绿**的用例被判红：
 #   A. flutter_tester 收尾 segfault（三平台都见过）
-#      → 输出只有 ✅ 与 TestDeviceException，最后是 "0 tests passed"（套件数-1 口径）
+#      → 输出只有 ✅ 与 TestDeviceException，最后是 "0 tests passed"
 #   B. Windows 收尾删临时目录失败（文件句柄未释放）
-#      → `PathAccessException: ... errno = 32`，用例名后挂 (failed)，
-#        但同一行上方所有 ✅ 用例都是通过的，且**没有 [E] 断言失败**
+#      → `PathAccessException: ... errno = 32`，用例名后挂 (failed)
+#   C. Windows 上 flutter_tester 收尾丢汇总
+#      → 用例全 ✅，但末尾 "0 tests passed" + "No tests were found."
+#        （进程非零退出，dart_test 没机会写汇总）
 #
 # 判据必须**同时**满足三条（放行 = 认定用例真的全过了）：
-#   ① 有已知噪声标记（上面 A 或 B 之一）；
+#   ① 有已知噪声标记（A/B/C 之一）；
 #   ② 有通过标记（Passing tests / All tests passed / tests passed）；
 #   ③ **没有任何**真实失败标记：`[E]`、`Some tests failed`、`Failing tests:`。
 # ③ 是安全底线：真实断言失败一定带 `[E]`（dart_test 的固定格式），
 # 只要出现就绝不放行 —— 宁可误判为失败，也绝不放过真错。
 is_finalize_crash() {
   local o="$1"
-  # ① 已知噪声（A 收尾崩溃 / B Windows 文件锁）
-  echo "$o" | grep -qiE 'TestDeviceException|segmentation fault|Shell subprocess crashed|PathAccessException|errno = 32' || return 1
+  # ① 已知噪声（A 收尾崩溃 / B Windows 文件锁 / C 汇总丢失）
+  echo "$o" | grep -qiE 'TestDeviceException|segmentation fault|Shell subprocess crashed|PathAccessException|errno = 32|No tests were found' || return 1
   # ③ 真实失败优先排除
   if echo "$o" | grep -qE '\[E\]|Some tests failed|Failing tests:'; then
     return 1
