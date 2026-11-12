@@ -13,10 +13,26 @@ import 'package:ovimap/export/dxf.dart';
 import 'package:ovimap/export/dxf_version.dart';
 import 'package:ovimap/models/label_type.dart';
 import 'package:ovimap/models/map_label.dart';
+import 'package:ovimap/services/app_paths.dart';
+import 'package:ovimap/services/store.dart';
 import 'package:ovimap/symbols/symbol_catalog.dart';
 
 void main() {
   test('导出供 ezdxf 校验的样本（真实图例库块）', () async {
+    // ⚠️ 平台差异：Windows 上 AppPaths.baseDir() 有 %APPDATA% 快路径（不碰插件），
+    // Linux/macOS 则真的调用 path_provider MethodChannel。未初始化 binding +
+    // 未注入临时目录时，CI（Linux）会抛 "Binding has not yet been initialized"，
+    // 本机（Windows）却跑得过——典型的「本机绿、CI 红」。
+    TestWidgetsFlutterBinding.ensureInitialized();
+    final base = Directory.systemTemp.createTempSync('ovimap_ezdxf');
+    addTearDown(() {
+      AppPaths.clearForTest();
+      try {
+        base.deleteSync(recursive: true);
+      } catch (_) {}
+    });
+    LabelStore.instance.setBaseDirForTest(base);
+
     final asset = File('assets/dxf/lispblock.dxf');
     expect(asset.existsSync(), isTrue, reason: '图例库资产必须在仓库里');
 

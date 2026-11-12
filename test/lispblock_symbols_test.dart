@@ -13,6 +13,8 @@ import 'package:ovimap/export/dxf_validate.dart';
 import 'package:ovimap/export/dxf_version.dart';
 import 'package:ovimap/models/label_type.dart';
 import 'package:ovimap/models/map_label.dart';
+import 'package:ovimap/services/app_paths.dart';
+import 'package:ovimap/services/store.dart';
 import 'package:ovimap/symbols/dxf_block_parser.dart';
 import 'package:ovimap/symbols/symbol_catalog.dart';
 
@@ -407,12 +409,21 @@ EOF
     late Directory tmp;
 
     setUp(() async {
+      // ⚠️ 必须初始化 binding + 注入临时目录：
+      // DxfExporter.export() 会走 LabelStore.exportDir() → AppPaths.baseDir()。
+      // Windows 上 baseDir() 有 %APPDATA% 快路径（不碰插件），所以**本机跑得过**；
+      // Linux/macOS 没这条快路径，会真的调用 path_provider MethodChannel，
+      // 未初始化 binding 就直接抛 "Binding has not yet been initialized"。
+      // 这正是"本机绿、CI 红"的典型平台差异，必须显式处理。
+      TestWidgetsFlutterBinding.ensureInitialized();
       tmp = Directory.systemTemp.createTempSync('ovimap_lispblock');
+      LabelStore.instance.setBaseDirForTest(tmp);
       LabelType.installCatalog(SymbolCatalog.fromTextSync(
           _asset().existsSync() ? _asset().readAsStringSync() : _miniDxf));
     });
 
     tearDown(() {
+      AppPaths.clearForTest();
       try {
         tmp.deleteSync(recursive: true);
       } catch (_) {}
