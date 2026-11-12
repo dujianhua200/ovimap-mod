@@ -25,12 +25,12 @@ void main() {
     // 本机（Windows）却跑得过——典型的「本机绿、CI 红」。
     TestWidgetsFlutterBinding.ensureInitialized();
     final base = Directory.systemTemp.createTempSync('ovimap_ezdxf');
-    addTearDown(() {
-      AppPaths.clearForTest();
-      try {
-        base.deleteSync(recursive: true);
-      } catch (_) {}
-    });
+    // ⚠️ teardown 里**不做磁盘删除**：
+    // 这个测试是"产出供 ezdxf 校验的样本"，产物本就该留着给后续步骤用；
+    // 而 `deleteSync` 在 flutter_tester 收尾阶段执行时，macOS 上会触发
+    // `Shell subprocess crashed with segmentation fault`（用例其实已全绿）。
+    // 临时目录交给系统清理即可（CI runner 是一次性的）。
+    addTearDown(AppPaths.clearForTest);
     LabelStore.instance.setBaseDirForTest(base);
 
     final asset = File('assets/dxf/lispblock.dxf');
