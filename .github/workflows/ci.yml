@@ -53,6 +53,14 @@ jobs:
           channel: stable
           cache: true
 
+      - name: 文件编码检查（门禁）
+        # 防止 GBK 混进仓库导致"本机正常、CI 构建崩"。
+        # 真实事故（v3.10.0）：.gitignore 被 PowerShell 按系统编码（GBK）写回，
+        # macOS 上 `flutter build macos` 读 .gitignore 时直接抛
+        # `Failed to decode data using encoding 'utf-8'`，整条打包流水线失败。
+        # 这类问题靠 review 抓不住，必须机械卡住。
+        run: python3 tool/check_encoding.py
+
       - name: 拉取依赖
         run: flutter pub get
 
