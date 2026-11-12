@@ -300,10 +300,6 @@ List<List<List<double>>> _polylines(String entities, String layer) {
   return out;
 }
 
-/// 该图层上所有折线的**总长**（各折线分别量后求和）。
-double _layerLength(List<List<List<double>>> polys) =>
-    polys.fold(0.0, (s, poly) => s + _len(poly));
-
 double _len(List<List<double>> pts) {
   var sum = 0.0;
   for (var i = 1; i < pts.length; i++) {
