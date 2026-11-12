@@ -5,9 +5,11 @@
 //  2. 符号目录把图块变成一个可用的 LabelType（id=块编号, name=图例文字）；
 //  3. 导出 DXF 时**真的写入了块定义并 INSERT 了该块**，且 R12 结构依旧合法
 //     （不出现 LWPOLYLINE/HATCH/370/420 —— 图例库是 2007 文件，直接抄会翻车）。
+import 'dart:convert' show latin1;
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:gbk_codec/gbk_codec.dart' show gbk_bytes;
 import 'package:ovimap/export/dxf.dart';
 import 'package:ovimap/export/dxf_validate.dart';
 import 'package:ovimap/export/dxf_version.dart';
@@ -505,7 +507,9 @@ EOF
       // 图例层 TuQian 上的 INSERT 必须引用 gl001
       expect(text, contains('0\nINSERT\n8\nTuQian\n2\ngl001\n'),
           reason: '图例栏必须用真图块，不能退回 HZ_* 近似块');
-      expect(text, contains('图  例'));
+      // 图例标题是中文，走 GBK 解码单独验（latin1 只保结构，见 _readGbk 注释）
+      expect(_readGbkText(r.file), contains('图  例'),
+          reason: '图例栏标题必须写出');
     });
 
     test('混用预置符号 + 图例块：两种块定义同时存在且互不影响', () async {
@@ -528,12 +532,24 @@ EOF
   });
 }
 
-/// 读 GBK 写盘文件（导出器一律 ANSI_936 落盘）。
-String _readGbk(File f) {
-  // 用 latin1 解码即可做"结构/ASCII 组码"断言：块名与组码都是 ASCII。
-  // 中文标签只要断言用 UTF-8 单独验，避免引 gbk_codec 进测试依赖。
-  return f.readAsStringSync(encoding: const SystemEncoding());
-}
+/// 读 GBK 写盘文件，按**单字节**解码以保留 ASCII 结构。
+///
+/// ⚠️ 必须用 `latin1`，不能用 `SystemEncoding`：
+/// `SystemEncoding` 是"当前平台默认编码"——Windows 上是 GBK/CP936（能读），
+/// Linux/macOS 上是 UTF-8（遇到 GBK 高位字节直接抛
+/// `Failed to decode data using encoding 'system'`）。
+/// 这正是"本机 Windows 绿、CI Linux 红"的第二处平台差异。
+///
+/// 用 latin1 做 1:1 字节→码点映射，组码与块名（全 ASCII）可正常断言；
+/// 中文内容要校验时另行按 GBK 解码，本文件只断言结构。
+String _readGbk(File f) => f.readAsStringSync(encoding: latin1);
+
+/// 按 GBK 解码读取（用于断言中文内容）。
+///
+/// 导出器以 ANSI_936 落盘，中文必须用 GBK 解码才对得上；
+/// 但 GBK 解码会把结构字节也解释掉，所以**仅用于中文文本断言**，
+/// 结构断言一律走 [_readGbk]（latin1）。
+String _readGbkText(File f) => gbk_bytes.decode(f.readAsBytesSync());
 
 /// 取某一 SECTION 的正文（`0\nSECTION\n2\n<name>` 到 `ENDSEC`）。
 String _section(String dxf, String name) {
