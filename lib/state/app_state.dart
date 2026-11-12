@@ -407,7 +407,7 @@ class AppState extends ChangeNotifier {
   MapLabel addLabelAtWgs(double lat, double lon) {
     final l = MapLabel(
       typeId: curType.id,
-      seq: labels.length + 1,
+      seq: _nextSeq(),
       lat: lat,
       lon: lon,
     );
@@ -456,6 +456,33 @@ class AppState extends ChangeNotifier {
     return l;
   }
 
+  /// 新点的序号：**取现有最大序号 + 1**，而不是 `length + 1`。
+  ///
+  /// `length + 1` 在删过点之后会算出重复序号（3 个点删掉中间那个，新点又是 3，
+  /// 于是两点同名同号，出图体检报"链内序号不连续"却找不到原因）。取 max+1
+  /// 保证序号单调递增，撤销删除后也不会撞号。
+  int _nextSeq() => _seqAfter(labels);
+
+  /// 给定点集的"下一个序号"（= 现有最大 seq + 1）。
+  static int _seqAfter(List<MapLabel> ls) {
+    var maxSeq = 0;
+    for (final e in ls) {
+      if (e.seq > maxSeq) maxSeq = e.seq;
+    }
+    return maxSeq + 1;
+  }
+
+  /// 收藏里已有的最大「标记N」编号（没有则 0）。
+  static int _maxMarkIndex(List<MapLabel> ls) {
+    var maxN = 0;
+    for (final e in ls) {
+      final m = RegExp(r'^标记(\d+)$').firstMatch(e.name.trim());
+      final n = m == null ? null : int.tryParse(m.group(1)!);
+      if (n != null && n > maxN) maxN = n;
+    }
+    return maxN;
+  }
+
   /// 上一个参与连线的点（跳过文字与独立个体）。
   MapLabel? lastLineLabel() {
     for (var i = labels.length - 1; i >= 0; i--) {
@@ -493,6 +520,9 @@ class AppState extends ChangeNotifier {
 
   /// 标记模式下的落点：用当前符号（若为连线型则按独立点落），
   /// 自动编号「标记N」，追加进根目录「标记」收藏。
+  ///
+  /// 落一次即自动退出（用户指定：标记是"点一下就走"的轻动作，不需要再点一次
+  /// 退出）；编号见 [_appendToMarkBook] 的 `_markCount` 初始化口径。
   Future<void> addMarkAtWgs(double lat, double lon) async {
     final l = MapLabel(
       typeId: curType.id,
@@ -548,7 +578,7 @@ class AppState extends ChangeNotifier {
     } else {
       toCid = target.id;
       toLabels = await store.loadCollection(toCid);
-      l.seq = toLabels.length + 1;
+      l.seq = _seqAfter(toLabels);
       toLabels.add(l);
       await store.finishCollection(
           existingId: toCid,
@@ -572,6 +602,10 @@ class AppState extends ChangeNotifier {
   int _markCount = 0;
 
   /// 把点追加进根目录「标记」收藏（没有则创建），并在地图上显示。
+  ///
+  /// [_markCount] 是进程内自增计数器，重启后从 0 开始——于是重启后再标记，
+  /// 名字会从「标记1」重新数，和收藏里已有的「标记1/2/3」撞名。这里在做任何
+  /// 写入前先用**收藏里已有的最大编号**把计数器顶上去。
   Future<void> _appendToMarkBook(MapLabel l) async {
     CollectionMeta? meta;
     for (final m in collections) {
@@ -590,7 +624,11 @@ class AppState extends ChangeNotifier {
     } else {
       cid = meta.id;
       ls = await store.loadCollection(cid);
-      l.seq = ls.length + 1;
+      _markCount = _maxMarkIndex(ls);
+      // 名字在 addMarkAtWgs 里已经按旧计数器拼好，这里按真实最大编号重写，
+      // 避免"重启后撞名"。
+      if (l.name.startsWith('标记')) l.name = '标记${_markCount + 1}';
+      l.seq = _seqAfter(ls);
       ls.add(l);
       await store.finishCollection(
           existingId: cid,
@@ -622,13 +660,19 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
-  // ---- 快照撤销栈（奥维式全局撤销：删除/清空/拖动/插点/导入都可回退） ----
+  // ---- 快照撤销栈（全局撤销：删除/清空/拖动/插点/导入都可回退） ----
   final List<String> _undoSnapshots = [];
-  static const int _undoLimit = 20;
+
+  /// 撤销深度。
+  ///
+  /// 曾经是 20：打一条 30 杆的杆路，撤到第 20 步就再也回不去了——而"撤不回去"
+  /// 正是现场最不能接受的失效方式。现在按**点数**限深（200 步快照上限约
+  /// 200×杆路 JSON，几十 MB 量级，桌面可接受），移动端另有内存上限兜底。
+  static const int _undoLimit = 200;
 
   /// 重做栈（与撤销栈对偶；桌面快捷键 Ctrl+Y / Ctrl+Shift+Z 使用）。
   final List<String> _redoSnapshots = [];
-  static const int _redoLimit = 20;
+  static const int _redoLimit = 200;
 
   /// 破坏性操作前调用：压入当前草稿快照（JSON 深拷贝，上限 20 步）。
   /// 新的编辑动作会清空重做栈（标准撤销/重做语义）。
@@ -704,11 +748,13 @@ class AppState extends ChangeNotifier {
     final lon = curLon ?? initLon;
     final l = MapLabel(
       typeId: curType.id,
-      seq: labels.length + 1,
+      seq: _nextSeq(),
       lat: lat,
       lon: lon,
       name: '我在这',
     );
+    // 与 addLabelAtWgs 同口径：先压快照再落点，否则「我在这」误点之后撤不回来。
+    pushUndoSnapshot();
     labels.add(l);
     _saveDraft();
     notifyListeners();
@@ -727,11 +773,12 @@ class AppState extends ChangeNotifier {
     }
     final first = MapLabel(
       typeId: typeId,
-      seq: labels.length + 1,
+      seq: _nextSeq(),
       lat: near.lat,
       lon: near.lon,
       lineGroupId: MapLabel().id, // 直接开新线组
     );
+    pushUndoSnapshot(); // 续画插入了一个点，同样必须可撤销
     labels.add(first);
     _saveDraft();
     notifyListeners();
@@ -877,9 +924,13 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ---- 待定编辑：拖动点位（奥维/Bigemap 顶点编辑式交互） ----
+  // ---- 拖动点位（真实拖拽：按下抓起、移动跟手、松手落位）----
 
-  /// 非 null 时处于"拖动点位"状态：地图上点一下，该点移到点击处。
+  /// 非 null 时该点正在被鼠标拖动。
+  ///
+  /// 历史口径是「点一下地图才移过去」的一次性待定态（要先右键、再点地图、
+  /// 再确认），与任何绘图软件的手感都不同。现在改为真拖拽：按下即抓起，
+  /// 移动实时跟手，松手落位；整个手势**只压一次撤销快照**。
   String? draggingLabelId;
 
   bool get hasPendingEdit => draggingLabelId != null;
@@ -887,6 +938,58 @@ class AppState extends ChangeNotifier {
   void cancelPendingEdit() {
     draggingLabelId = null;
     notifyListeners();
+  }
+
+  /// 抓起一个点准备拖动。
+  ///
+  /// **快照是懒压的**：真正产生位移（[dragLabelTo] 首次改动坐标）时才压一次，
+  /// 整段拖拽手势共用这一份。若在这里就压，用户只是点了一下点、或者按了右栏
+  /// 「拖动点位」又直接 Esc，撤销栈里就会多出一份"什么都没变"的快照，
+  /// 于是 Ctrl+Z 按下去看不到任何变化——正是"撤销像坏了"的观感来源。
+  void beginDragLabel(MapLabel l) {
+    if (draggingLabelId == l.id) return;
+    draggingLabelId = l.id;
+    _dragMoved = false;
+    _dragSnapshotPushed = false;
+    notifyListeners();
+  }
+
+  /// 本次拖拽是否真的移动过（没移动就不该落盘、不该提示"已移动"）。
+  bool _dragMoved = false;
+
+  /// 本段拖拽手势是否已压过快照（整段只压一次）。
+  bool _dragSnapshotPushed = false;
+
+  /// 拖动中的实时移动：**不压第二份快照**。
+  void dragLabelTo(MapLabel l, double lat, double lon) {
+    if (l.lat == lat && l.lon == lon) return;
+    if (!_dragSnapshotPushed) {
+      pushUndoSnapshot();
+      _dragSnapshotPushed = true;
+    }
+    l.lat = lat;
+    l.lon = lon;
+    _dragMoved = true;
+    // 拖动中段距是"活的"：一直按新位置重算，松手时不需要再补算。
+    _invalidateNeighborDist(l);
+    notifyListeners();
+  }
+
+  /// 松手落位：只有真的移动过才落盘（避免误点一下就写文件、污染同步版本号）。
+  bool endDragLabel() {
+    draggingLabelId = null;
+    final moved = _dragMoved;
+    _dragMoved = false;
+    if (!_dragSnapshotPushed) {
+      // 一次都没动过：把没用上的快照撤掉，撤销栈保持干净。
+      _dragSnapshotPushed = false;
+      notifyListeners();
+      return false;
+    }
+    _dragSnapshotPushed = false;
+    _saveDraft();
+    notifyListeners();
+    return moved;
   }
 
   MapLabel? labelById(String id) {
@@ -897,6 +1000,9 @@ class AppState extends ChangeNotifier {
   }
 
   /// 把已有点移到新位置（WGS84），相邻同链点的段距改为自动重算。
+  ///
+  /// 一次性移动（属性面板改坐标 / 粘贴坐标）走这里；鼠标拖拽走
+  /// [beginDragLabel] → [dragLabelTo] → [endDragLabel]，避免逐帧压快照。
   void moveLabelToWgs(MapLabel l, double lat, double lon) {
     pushUndoSnapshot();
     l.lat = lat;
@@ -907,15 +1013,18 @@ class AppState extends ChangeNotifier {
   }
 
   /// 相邻同链点的实测段距改为自动（haversine）；段标注文字保留，如需修正点开属性改。
+  ///
+  /// 判据用**线组**而非数组下标：下标相邻但在不同线组（不同杆路）时不该互相影响；
+  /// 而线组相同的点即使中间隔着独立个体（箱体/文字不参与连线）也要一并失效。
   void _invalidateNeighborDist(MapLabel l) {
+    final gid = l.lineGroupId;
+    if (gid.isEmpty) return;
     final idx = labels.indexOf(l);
     for (final d in const [-1, 1]) {
       final i = idx + d;
       if (i < 0 || i >= labels.length) continue;
       final n = labels[i];
-      if (n.lineGroupId.isNotEmpty && n.lineGroupId == l.lineGroupId) {
-        n.distanceM = null;
-      }
+      if (n.lineGroupId == gid) n.distanceM = null;
     }
   }
 

@@ -343,8 +343,14 @@ class _WorkspacePageState extends State<WorkspacePage> {
         st.endTopoLink();
         toast(context, '已结束拓扑连线');
       case AppMode.edit:
+        // Esc = 结束当前绘制，回到浏览态（**不清空草稿**）。
+        // 旧行为在采集模式下按 Esc 只弹一句"没有可取消的操作"，用户被卡在
+        // 打点态里：想滚轮看看别处，一点又落一个新点。任何编辑器里 Esc 都该
+        // 先退出当前工具。
+        st.setMode(AppMode.view);
+        toast(context, '已结束打点（${st.labels.length} 个点仍在，Ctrl+S 保存）');
       case AppMode.view:
-        toast(context, '当前没有可取消的操作（Esc 可退出测量/连线/框选、取消待定点位）');
+        toast(context, '当前没有可取消的操作（Esc 可退出打点/测量/连线/框选）');
     }
   }
 
@@ -894,6 +900,8 @@ class _WorkspacePageState extends State<WorkspacePage> {
           hasHeading: false,
           // 桌面：点选交给右栏（不直接弹对话框）。
           openDetailOnTap: false,
+          // 桌面开启「按住点直接拖」：鼠标拖拽才是改点的直觉操作。
+          enablePointDrag: true,
           // 交互开关**刻意不传**：走 [defaultFlagsForCurrentPlatform] 的桌面口径
           // （drag + scrollWheelZoom）。旧代码传的是 `InteractiveFlag.all` ——
           // 它虽然含滚轮缩放，但同时打开了旋转与惯性滑动，还会打开双击缩放，

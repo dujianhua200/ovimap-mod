@@ -402,10 +402,9 @@ class _RightPanelState extends State<RightPanel> {
             toast(context, '已从「${_nm(l)}」开始新分支杆路，继续点地图绘制');
           }),
         if (draft)
-          _wide('拖动点位', Icons.open_with, () {
-            st.draggingLabelId = l.id;
-            st.refreshUi();
-            toast(context, '拖动模式：在地图上点一下，把「${_nm(l)}」移到那里');
+          _wide('拖动点位（也可直接按住点拖动）', Icons.open_with, () {
+            st.beginDragLabel(l);
+            toast(context, '拖点已就绪：按住「${_nm(l)}」直接拖到新位置（Esc 取消）');
           }),
         if (st.hasFix && st.curLat != null && st.curLon != null)
           _wide('移到当前定位', Icons.my_location, () {

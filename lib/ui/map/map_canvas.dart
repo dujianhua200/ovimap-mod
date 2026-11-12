@@ -45,6 +45,7 @@ class MapCanvas extends StatefulWidget {
     this.onCameraChanged,
     this.onSecondaryTap,
     this.onPointerGeo,
+    this.enablePointDrag = false,
   });
 
   final AppState st;
@@ -88,6 +89,12 @@ class MapCanvas extends StatefulWidget {
   /// 鼠标悬停位置回调（桌面）：回传 WGS-84 经纬度；移出地图时回传 (null, null)。
   /// 供状态栏显示「鼠标所在经纬度」（奥维桌面版的状态栏口径）。
   final void Function(double? lat, double? lon)? onPointerGeo;
+
+  /// 是否允许「按住已有点直接拖动」。
+  ///
+  /// 桌面 true（鼠标拖拽是唯一符合直觉的改点方式）；移动端 false——单指拖动
+  /// 必须留给地图平移，否则现场想挪地图却把杆位拖跑了。
+  final bool enablePointDrag;
 
   @override
   State<MapCanvas> createState() => _MapCanvasState();
@@ -164,18 +171,6 @@ class _MapCanvasState extends State<MapCanvas> {
     }
     switch (st.mode) {
       case AppMode.edit:
-        // 待定编辑优先处理：拖动点位（奥维顶点编辑式）
-        if (st.draggingLabelId != null) {
-          final l = st.labelById(st.draggingLabelId!);
-          st.draggingLabelId = null;
-          if (l != null) {
-            final w = st.toWgs(point.latitude, point.longitude);
-            st.moveLabelToWgs(l, w[0], w[1]);
-            toast(context,
-                '已移动「${l.name.isEmpty ? l.type.name : l.name}」，相邻段距自动重算');
-          }
-          return;
-        }
         final l = st.addLabelAtDisp(point.latitude, point.longitude);
         widget.onSelect?.call(l, '');
         if (l.typeId == 'text') {
@@ -237,6 +232,75 @@ class _MapCanvasState extends State<MapCanvas> {
         return;
       }
       showContextCard(context, st, point.latitude, point.longitude);
+    }
+  }
+
+  // ================= 真拖拽点位（按下抓起 / 移动跟手 / 松手落位） =================
+  //
+  // 旧交互是「点一下右键菜单 → 选『拖动点位』→ 再点地图 → 点才跳过去」：
+  // 三步、不能中途反悔、也看不到拖动过程，任何绘图软件都不这么做。
+  // 现在改为标准拖拽：地图上按住已有点直接拖，松手落位。
+  //
+  // 为什么不用 GestureDetector 包 Marker：Marker 在 flutter_map 里只是画布内容，
+  // 手势统一由地图层处理；在 marker 上再套 GestureDetector 会和地图平移抢事件。
+  // 所以用 pointer 事件做「命中且未平移」的判定（见 _dragStartOffset 的阈值）。
+
+  /// 按下时的屏幕位置；移动超过阈值才真正开始拖（否则视为单击）。
+  Offset? _dragStartOffset;
+
+  /// 已进入拖拽态的 label id（与 `st.draggingLabelId` 同步）。
+  String? _draggingId;
+
+  void _onPointerDown(PointerDownEvent e, LatLng point) {
+    _dragStartOffset = e.localPosition;
+    _draggingId = null;
+    if (!widget.enablePointDrag) return;
+    if (st.mode != AppMode.view && st.mode != AppMode.edit) return;
+    // 已有点才能拖：只认草稿（收藏点属于只读覆盖层，不能就地改）。
+    final hit = _hitTestGeo(st.labels, point);
+    _dragCandidate = hit;
+  }
+
+  MapLabel? _dragCandidate;
+
+  void _onPointerMove(PointerMoveEvent e, LatLng point) {
+    if (!widget.enablePointDrag) return;
+    final start = _dragStartOffset;
+    if (start == null) return;
+    // 桌面鼠标按左键才算拖；别的键(such as 右键)留给菜单。
+    if (e.buttons != kPrimaryMouseButton && e.kind == PointerDeviceKind.mouse) {
+      return;
+    }
+    if (_draggingId == null) {
+      if (!e.down) return;
+      if ((e.localPosition - start).distance < 4) return; // 抖动容差
+      // 右栏「拖动点位」按钮预先武装了 draggingLabelId；直接拖也算，不用再点一次。
+      final armed = st.draggingLabelId;
+      final cand = armed != null ? st.labelById(armed) : _dragCandidate;
+      if (cand == null) return;
+      _draggingId = cand.id;
+      if (armed == null) st.beginDragLabel(cand);
+    }
+    final id = _draggingId;
+    if (id == null) return;
+    final l = st.labelById(id);
+    if (l == null) return;
+    final w = st.toWgs(point.latitude, point.longitude);
+    st.dragLabelTo(l, w[0], w[1]);
+  }
+
+  void _onPointerUp(PointerUpEvent e, LatLng point) {
+    final id = _draggingId;
+    _dragStartOffset = null;
+    _dragCandidate = null;
+    _draggingId = null;
+    if (id == null) return;
+    final moved = st.endDragLabel();
+    final l = st.labelById(id);
+    // 世界坐标已在 move 阶段持续跟随，这里只做收尾提示。
+    if (moved && l != null && mounted) {
+      toast(context,
+          '已移动「${l.name.trim().isEmpty ? l.type.name : l.name.trim()}」，相邻段距自动重算（Ctrl+Z 可撤销）');
     }
   }
 
@@ -354,13 +418,21 @@ class _MapCanvasState extends State<MapCanvas> {
             onTap: _onTap,
             onLongPress: _onLongPress,
             onSecondaryTap: widget.onSecondaryTap,
+            // 真拖拽点位（桌面）：按下/移动/抬起三个回调都在 flutter_map 里，
+            // 命中判定自己做（见 _onPointerDown 的说明）。
+            onPointerDown: _onPointerDown,
+            onPointerMove: _onPointerMove,
+            onPointerUp: _onPointerUp,
             onPointerHover: (e, point) {
               // 悬停点位的坐标系与其它回调一致（显示基准）；交回调用方前转成 WGS-84。
               final w = st.toWgs(point.latitude, point.longitude);
               widget.onPointerGeo?.call(w[0], w[1]);
             },
             interactionOptions: InteractionOptions(
-              flags: flags,
+              // 拖点期间**关掉地图平移**：否则鼠标一动地图跟着跑，杆位反而"站不住"。
+              flags: st.draggingLabelId != null
+                  ? (flags & ~InteractiveFlag.drag)
+                  : flags,
               // ⚠️ 桌面必须关掉「按住 Ctrl 移动鼠标 = 旋转地图」：
               // flutter_map 的 `CursorKeyboardRotationOptions` 默认把 Control 键当旋转触发键，
               // 于是 Ctrl+Z / Ctrl+S / Ctrl+E 等桌面快捷键在鼠标移动时会顺带把地图转掉。
