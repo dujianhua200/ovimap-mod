@@ -1,0 +1,126 @@
+# ============================================================================
+#  图例库符号（lispblock.dxf）专项校验
+#
+#  为什么单独一条流水线：
+#    符号功能的验收不能只靠 Dart 单测——本项目历史上正是被"字符串断言"坑过
+#    （R12 结构贴上 AC1015 标签，字符串全过、CAD 打不开、实体被静默丢弃）。
+#    这里用**第三方 DXF 引擎 ezdxf 真正打开**导出的文件，再加上逐块渲染，
+#    把"几何长得对不对"变成可自动判定的东西。
+#
+#  跑什么：
+#    ① flutter test 三个符号测试文件（解析 / 目录 / 导出 / UI）
+#    ② 用真实图例库导出 R12 + R2000 样本
+#    ③ ezdxf 严格打开 + 块定义/INSERT 断言（tool/validate_lispblock.py）
+#    ④ 全量符号对照表渲染成 PNG（artifact，供人肉抽查）
+#
+#  触发：改动符号相关路径时自动跑；也可手动。
+# ============================================================================
+
+name: 图例库符号校验
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'lib/symbols/**'
+      - 'lib/export/dxf*.dart'
+      - 'lib/models/label_type.dart'
+      - 'lib/ui/desktop/symbol_library.dart'
+      - 'assets/dxf/**'
+      - 'test/lispblock_*.dart'
+      - 'tool/validate_lispblock.py'
+      - 'tool/render_*.py'
+      - '.github/workflows/symbols.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'lib/symbols/**'
+      - 'lib/export/dxf*.dart'
+      - 'lib/models/label_type.dart'
+      - 'assets/dxf/**'
+      - 'test/lispblock_*.dart'
+  workflow_dispatch:
+
+concurrency:
+  group: symbols-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  symbols:
+    name: 解析 / 导出 / ezdxf 严格校验
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.2'
+          channel: stable
+          cache: true
+
+      - name: 拉取依赖
+        run: flutter pub get
+
+      - name: 静态分析（符号相关代码零容忍）
+        # 全局 lint 有历史 info，这里只针对符号/导出路径要求干净：
+        # 任何 error/warning 都会让本流水线红。
+        run: |
+          flutter analyze --no-fatal-infos
+          echo "--- 复核符号路径无 warning/error ---"
+          flutter analyze lib/symbols lib/export lib/models/label_type.dart \
+            --no-fatal-infos 2>&1 | tee analyze.log
+          if grep -qE '^\s*(error|warning)' analyze.log; then
+            echo "::error::符号/导出路径存在 error 或 warning"
+            exit 1
+          fi
+
+      - name: 符号单测（解析 / 目录 / 导出 / UI）
+        # flutter_tester 收尾偶发崩溃（已知，非本仓库代码问题），至多重试一次。
+        run: |
+          flutter test test/lispblock_symbols_test.dart \
+                       test/lispblock_ui_test.dart \
+                       test/lispblock_ezdxf_strict_test.dart \
+            && exit 0
+          echo "::warning::第一次运行非零退出，重试一次"
+          flutter test test/lispblock_symbols_test.dart \
+                       test/lispblock_ui_test.dart \
+                       test/lispblock_ezdxf_strict_test.dart
+
+      - name: 安装 ezdxf（第三方 DXF 引擎）
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install ezdxf matplotlib
+
+      - name: ezdxf 严格打开导出的 DXF
+        # 这一步是整个符号功能的"真解析"闸门：
+        # readfile 不接受结构错误；块定义缺失、INSERT 缺失、R12 出现 2007 专有
+        # 实体，任何一条都会失败。
+        run: python3 tool/validate_lispblock.py out
+
+      - name: 渲染图纸（供人肉抽查几何）
+        run: |
+          mkdir -p out/png
+          for f in out/*.dxf; do
+            base=$(basename "$f" .dxf)
+            python3 tool/render_dxf_png.py "$f" "out/png/$base.png" "$base" || true
+          done
+          ls -la out/png
+
+      - name: 上传校验产物
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: symbols-dxf-samples
+          path: |
+            out/*.dxf
+            out/png/*.png
+            analyze.log
+          if-no-files-found: warn
+          retention-days: 14

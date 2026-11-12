@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models/label_type.dart';
 import '../models/map_label.dart';
+import 'desktop/symbol_library.dart' show DxfBlockThumb;
 
 /// 地图标签符号（按图例形状绘制）。
 ///
@@ -49,6 +50,50 @@ class LabelSymbol extends StatelessWidget {
     final disp = label.name.trim().isNotEmpty
         ? label.name.trim()
         : (lt.symbol.isNotEmpty ? lt.symbol : lt.name);
+
+    // 图例库符号：用 DXF 真几何画（与出图一致），不再用形状近似。
+    if (lt.isBlock) {
+      return SizedBox(
+        width: symbolSize * scale,
+        height: symbolSize * scale,
+        child: Stack(
+          clipBehavior: Clip.none,
+          alignment: Alignment.center,
+          children: [
+            if (selected)
+              Positioned.fill(
+                child: Center(
+                  child: Container(
+                    width: symbolSize * scale * 0.86,
+                    height: symbolSize * scale * 0.86,
+                    decoration: BoxDecoration(
+                      color: const Color(0x33FFD740),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                  ),
+                ),
+              ),
+            Padding(
+              padding: const EdgeInsets.all(2),
+              child: DxfBlockThumb(
+                block: lt.block!,
+                color: selected ? const Color(0xFF0288D1) : const Color(0xFF263238),
+                strokeWidth: selected ? 1.6 : 1.2,
+              ),
+            ),
+            if (label.name.trim().isNotEmpty)
+              Positioned(
+                top: symbolSize * scale * 0.78,
+                left: -70,
+                right: -70,
+                child: Center(
+                  child: _OutlinedText(label.name.trim(), 9.5 * scale),
+                ),
+              ),
+          ],
+        ),
+      );
+    }
 
     return SizedBox(
       width: symbolSize * scale,

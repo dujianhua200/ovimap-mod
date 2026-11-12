@@ -4,8 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import 'models/label_type.dart';
 import 'services/platform_caps.dart';
 import 'state/app_state.dart';
+import 'symbols/symbol_catalog.dart';
 import 'sync/sync_controller.dart';
 import 'ui/desktop/workspace_page.dart';
 import 'ui/home_page.dart';
@@ -24,7 +26,23 @@ void main(List<String> args) {
       DeviceOrientation.portraitDown,
     ]);
   }
+  // 图例库（assets/dxf/lispblock.dxf）灌进符号表：启动即装，不等 UI。
+  unawaited(_bootstrapSymbolCatalog());
   runApp(OviMapApp(startupProjectPath: startupProjectFromArgs(args)));
+}
+
+/// 装载随包图例库（`assets/dxf/lispblock.dxf`）到 [LabelType]。
+///
+/// **启动即装**、不 await：解析约 40ms，装完 notify 即可，不阻塞首帧；
+/// 失败（资源缺失 / 解析异常）只静默回退到预置 16 种符号——绝不因为
+/// "图例库文件坏了"就起不来。
+Future<void> _bootstrapSymbolCatalog() async {
+  try {
+    final cat = await SymbolCatalog.ensureLoaded();
+    LabelType.installCatalog(cat);
+  } catch (_) {
+    // 静默回退：预置符号始终可用。
+  }
 }
 
 /// 从启动参数里解析 `.ovimap` 工程文件路径（T22 文件关联：`ovimap.exe "xxx.ovimap"`）。

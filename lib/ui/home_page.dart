@@ -707,6 +707,7 @@ class _HomePageState extends State<HomePage> {
                       width: 62,
                       margin: const EdgeInsets.symmetric(horizontal: 2),
                       alignment: Alignment.center,
+                      padding: const EdgeInsets.symmetric(horizontal: 3),
                       decoration: BoxDecoration(
                         color: st.curType.id == t.id
                             ? t.color.withValues(alpha: 0.85)
@@ -717,10 +718,17 @@ class _HomePageState extends State<HomePage> {
                                 ? kAccent
                                 : Colors.transparent),
                       ),
+                      // 图例库符号：名称优先（用户按「新建水泥杆」找，不按 gl001）；
+                      // 窄屏放不下就用 9.5 号字，仍显示名称而不是退成编号。
                       child: Text(t.name,
                           maxLines: 1,
-                          style: const TextStyle(
-                              color: kTextMain, fontSize: 10.5)),
+                          textAlign: TextAlign.center,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              color: st.curType.id == t.id
+                                  ? Colors.white
+                                  : kTextMain,
+                              fontSize: t.isBlock ? 9.5 : 10.5)),
                     ),
                   ),
               ],

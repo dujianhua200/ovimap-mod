@@ -246,8 +246,15 @@ class _RightPanelState extends State<RightPanel> {
           style: const TextStyle(color: TokC.textMain, fontSize: TokFs.body),
           decoration: dec('符号样式'),
           items: [
+            // 内置符号：符号字 + 名称；图例库符号：名称 + 块编号
+            // （用户是按「新建水泥杆」选，核对时要能对到 gl001）。
             for (final t in LabelType.all)
-              DropdownMenuItem(value: t.id, child: Text('${t.symbol} ${t.name}')),
+              DropdownMenuItem(
+                value: t.id,
+                child: Text(t.isBlock
+                    ? '${t.name}（${t.id}）'
+                    : '${t.symbol} ${t.name}'),
+              ),
           ],
           onChanged: (v) {
             if (v == null || v == l.typeId) return;
