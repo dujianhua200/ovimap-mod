@@ -17,7 +17,10 @@ name: CI 门禁
 
 on:
   push:
-    branches: [main, master]
+    # 允许所有分支推送即跑门禁：
+    # 改造期间我们直接在 feature 分支上验证（fix/* 与 feat/*），
+    # 只认 main 的话每次都得手动 dispatch，链路容易漏。
+    branches: ['**']
     paths-ignore:
       - 'docs/**'
       - '**/*.md'
