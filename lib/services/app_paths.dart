@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 
 /// 跨平台「权威数据目录」单点收口。
 ///
@@ -44,6 +45,23 @@ class AppPaths {
     _cache = null;
   }
 
+  /// path_provider 的当前实现（测试替换成 `FakePathProvider` 后与默认值不同）。
+  ///
+  /// 用它当**缓存钥匙**：`PathProviderPlatform.instance` 被换掉，就说明运行环境
+  /// 变了（测试用例之间换临时目录），此前缓存的 `_cache` 必须作废。
+  /// 否则会出现「同一进程里第二个用例仍然写进第一个用例的目录」这种串扰。
+  static Object? _cachedProviderTag;
+
+  /// 缓存是否仍然有效（环境未变且目录还在）。
+  static bool _cacheValid() {
+    final cached = _cache;
+    if (cached == null) return false;
+    if (!identical(_cachedProviderTag, PathProviderPlatform.instance)) {
+      return false;
+    }
+    return cached.existsSync();
+  }
+
   static Future<Directory> _ensure(Directory d) async {
     if (!d.existsSync()) await d.create(recursive: true);
     return d;
@@ -55,20 +73,26 @@ class AppPaths {
   ///   （与旧版一致，不得变）
   /// - Windows：`%APPDATA%\ovimap`
   /// - 其它：`getApplicationSupportDirectory()/ovimap`
+  ///
+  /// ⚠️ **Windows 分支必须先检查 path_provider 是否被替换**：
+  /// 直接读 `%APPDATA%` 会绕过 `PathProviderPlatform`，于是测试里设的
+  /// `FakePathProvider(临时目录)` 完全失效——所有用例都写进真实的
+  /// `%APPDATA%\ovimap`，单文件内多个用例互相污染（缓存命中态、脏地名等）。
+  /// 这正是「同一份代码单跑绿、全量跑红」的根因。
   static Future<Directory> baseDir() async {
     if (_force != null) return _ensure(_force!);
 
-    if (Platform.isWindows) {
+    if (Platform.isWindows && _usesDefaultPathProvider) {
       final appData = Platform.environment['APPDATA'];
       if (appData != null && appData.isNotEmpty) {
         final d = await _ensure(Directory('$appData\\ovimap'));
         _cache = d;
+        _cachedProviderTag = PathProviderPlatform.instance;
         return d;
       }
     }
 
-    final cached = _cache;
-    if (cached != null && cached.existsSync()) return cached;
+    if (_cacheValid()) return _cache!;
 
     final Directory ext;
     if (Platform.isAndroid) {
@@ -79,7 +103,19 @@ class AppPaths {
     }
     final d = await _ensure(Directory('${ext.path}/ovimap'));
     _cache = d;
+    _cachedProviderTag = PathProviderPlatform.instance;
     return d;
+  }
+
+  /// platform 实现是否就是出厂默认的 MethodChannel 实现。
+  ///
+  /// `MethodChannelPathProvider` 在 `path_provider_platform_interface` 的 `src/`
+  /// 下、**没有导出**，所以不能直接做 `is` 判断。这里改用运行时类型名判断：
+  /// 测试里的 fake 都是 `FakePathProvider` / `_FakePathProvider`，
+  /// 名字不含 `MethodChannel`，判据干净且不依赖内部实现路径。
+  static bool get _usesDefaultPathProvider {
+    final name = PathProviderPlatform.instance.runtimeType.toString();
+    return name.contains('MethodChannel');
   }
 
   static Future<Directory> _sub(String name) async {

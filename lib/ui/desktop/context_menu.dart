@@ -43,7 +43,7 @@ Future<void> showMapContextMenu(
         PopupMenuItem<String>(
             value: 'branch', child: _mi(Icons.call_split, '从此点续画分支')),
         PopupMenuItem<String>(
-            value: 'drag', child: _mi(Icons.open_with, '拖动点位')),
+            value: 'drag', child: _mi(Icons.open_with, '移到此处（也可直接按住点拖动）')),
         PopupMenuItem<String>(
             value: 'break_chain',
             child: _mi(Icons.link_off, '断开续画（下一点另起）')),
@@ -117,9 +117,13 @@ Future<void> showMapContextMenu(
       toast(context, '已断开续画：下一点将另起新线，不接任何已有杆路');
       break;
     case 'drag':
-      st.draggingLabelId = hit.label!.id;
-      st.refreshUi();
-      toast(context, '拖动模式：在地图上点一下，把「${_nm(hit.label!)}」移到那里');
+      // 位移改成**按住直接拖**（见 MapCanvas._onPointerDown / app_state.beginDragLabel）。
+      // 原入口"先选拖动、再点地图"多一步且中途不能反悔；这里保留为「一步移到此处」，
+      // 仍然只压一次快照、可一次撤销。
+      final w = st.toWgs(point.latitude, point.longitude);
+      st.moveLabelToWgs(hit.label!, w[0], w[1]);
+      toast(context,
+          '已把「${_nm(hit.label!)}」移到此处，相邻段距自动重算（Ctrl+Z 可撤销）；也可直接按住该点拖动');
       break;
     case 'copy_coord':
       _copy(context, _coord(st, hit.label!));
