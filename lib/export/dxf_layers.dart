@@ -117,17 +117,24 @@ class DxfLayers {
         lineWeight: 35,
         business: true),
     // —— 底图层（本次新增 / 调整）——
+    //
+    // 道路：用户要求**纯白**（ACI 7）。原来是 ACI 250（浅灰），
+    // 在卫星图导出的深色底上几乎看不见，打印时也发灰。
+    // 真彩色同时给 0xFFFFFF，R2000 下按真彩显示，R12 下退回 ACI 7（白）。
     DxfLayerSpec(
         name: 'DaoLuBian',
-        aci: 250,
-        trueColor: cDaoLuBian,
+        aci: 7,
+        trueColor: 0xFFFFFF,
         lineWeight: 20),
+    // 道路中心线：同属"道路"，一并纯白但与边线区分线宽
+    // （边线 20=0.20mm，中心线 13=0.13mm，肉眼能分出主次又不抢白色主调）。
     DxfLayerSpec(
         name: 'DaoLuZhong',
-        aci: 8,
-        trueColor: cDaoLuZhong,
-        lineWeight: 15),
-    DxfLayerSpec(name: 'DaoLu', aci: 7, trueColor: cDaoLu, lineWeight: 18),
+        aci: 7,
+        trueColor: 0xFFFFFF,
+        lineWeight: 13),
+    // 路名注记：纯白（原为深灰，与白色道路不协调）
+    DxfLayerSpec(name: 'DaoLu', aci: 7, trueColor: 0xFFFFFF, lineWeight: 18),
     DxfLayerSpec(name: 'JianZhu', aci: 8, trueColor: cJianZhu, lineWeight: 13),
     DxfLayerSpec(
         name: 'JianZhuFill',

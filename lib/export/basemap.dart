@@ -417,6 +417,19 @@ class _LoadResult<T> {
 class BasemapFetcher {
   BasemapFetcher._();
 
+  /// 道路去重键：名称 + 首尾点（精确匹配才算重复）。
+  ///
+  /// 用于"联网结果 + 内置兜底"合并时避免同一条路画两遍。
+  static String _roadKey(RoadPoly r) {
+    if (r.pts.isEmpty) return r.name;
+    final f = r.pts.first, l = r.pts.last;
+    return '${r.name}|${f[0]}|${f[1]}|${l[0]}|${l[1]}';
+  }
+
+  /// 给数据来源打标记（`+内置`），并避免重复叠加同一个后缀。
+  static String _srcTag(String base, String tag) =>
+      base.contains(tag) ? base : '$base$tag';
+
   /// 天地图兜底关键词枚举（OSM 地名为空或过少时）。
   static const List<String> tdtKeywords = ['小区', '村', '社区', '花园', '苑'];
 
@@ -773,10 +786,20 @@ class BasemapFetcher {
     var bldReport = buildings.report;
 
     if (BundledBasemap.enabled) {
-      final needRoads = roadsOut.isEmpty &&
-          roadsReport.state != FetchState.cached;
-      final needBld = buildingsOut.isEmpty;
-      final needPlaces = placesOut.isEmpty;
+      // 判据不是"是否为空"，而是"**是否少到不够用**"。
+      //
+      // 用户实测：他那边 Overpass 抓到了 4 条道路、0 栋建筑、0 个地名，
+      // 于是 `isEmpty` 判据全部跳过 → 兜底底图没生效（原话"地图包好像没起作用"）。
+      // 但 4 条路画不出一张勘察图：现场要的是成片的建筑轮廓与路网。
+      //
+      // 所以改成数量门槛：少于这些条数就**补全**（取并集，不是替换），
+      // 既保证图面够用，又不会把联网抓到的新数据丢掉。
+      const minRoads = 40; // 一张 A3 勘察图至少要这个量级的道路
+      const minBuildings = 20;
+      const minPlaces = 5;
+      final needRoads = roadsOut.length < minRoads;
+      final needBld = buildingsOut.length < minBuildings;
+      final needPlaces = placesOut.length < minPlaces;
       if ((needRoads || needBld || needPlaces) &&
           BundledBasemap.covers(bbox[0], bbox[1], bbox[2], bbox[3])) {
         try {
@@ -784,17 +807,23 @@ class BasemapFetcher {
           if (needRoads && bundled.roadsLoaded) {
             final br = bundled.roadsIn(bbox[0], bbox[1], bbox[2], bbox[3]);
             if (br.isNotEmpty) {
-              roadsOut = [
-                for (final r in br)
-                  RoadPoly(
-                    r.pts,
-                    OverpassClient.gradeOf(r.highway),
-                    r.name,
-                  ),
-              ];
+              // 合并：保留联网抓到的，补上内置里缺的（按名称+首尾点去重）
+              final merged = <RoadPoly>[...roadsOut];
+              final seen = <String>{
+                for (final r in roadsOut) _roadKey(r),
+              };
+              for (final r in br) {
+                final rp = RoadPoly(
+                  r.pts,
+                  OverpassClient.gradeOf(r.highway),
+                  r.name,
+                );
+                if (seen.add(_roadKey(rp))) merged.add(rp);
+              }
+              roadsOut = merged;
               roadsReport = DatasetReport(
                 FetchState.ok,
-                source: '${roadsReport.source}+内置',
+                source: _srcTag(roadsReport.source, '+内置'),
                 count: roadsOut.length,
               );
             }
@@ -803,11 +832,12 @@ class BasemapFetcher {
             final rings = bundled.buildingsIn(bbox[0], bbox[1], bbox[2], bbox[3]);
             if (rings.isNotEmpty) {
               buildingsOut = [
+                ...buildingsOut,
                 for (final ring in rings) BuildingPoly([ring], '内置兜底')
               ];
               bldReport = DatasetReport(
                 FetchState.ok,
-                source: '${bldReport.source}+内置',
+                source: _srcTag(bldReport.source, '+内置'),
                 count: buildingsOut.length,
               );
             }
@@ -815,19 +845,25 @@ class BasemapFetcher {
           if (needPlaces && bundled.placesLoaded) {
             final bp = bundled.placesIn(bbox[0], bbox[1], bbox[2], bbox[3]);
             if (bp.isNotEmpty) {
-              placesOut = [
-                for (final p in bp)
-                  PlaceFeature(
+              final merged = <PlaceFeature>[...placesOut];
+              final seen = <String>{
+                for (final p in placesOut) '${p.name}|${p.lat.toStringAsFixed(4)}',
+              };
+              for (final p in bp) {
+                if (seen.add('${p.name}|${p.lat.toStringAsFixed(4)}')) {
+                  merged.add(PlaceFeature(
                     name: p.name,
                     lat: p.lat,
                     lon: p.lon,
                     level: PlaceLevel.village,
                     isArea: false,
-                  ),
-              ];
+                  ));
+                }
+              }
+              placesOut = merged;
               placesReport = DatasetReport(
                 FetchState.ok,
-                source: '${placesReport.source}+内置',
+                source: _srcTag(placesReport.source, '+内置'),
                 count: placesOut.length,
               );
             }

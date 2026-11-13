@@ -421,9 +421,13 @@ void main() {
     expect(scaleNS, greaterThan(1000),
         reason: '南北向比例不应退化到最小档（旧公式会取 1:100）');
 
-    // 南北向：竖直路 → 描边偏移在 X；半宽=纸面mm×比例
+    // 南北向：竖直路 → 描边偏移在 X；半宽 = 纸面毫米（v3.12 起直接=图纸单位）
+    //
+    // 旧口径是 `halfMm / 1000 * scale`（纸面 mm 当"米 × 比例"），
+    // 1:3000 时放大 3 倍；用户插件（66.dxf 实测）是"纸面 mm 直接当图纸单位"，
+    // 本用例随之更新，仍保留"南北/东西一致、不退化到最小档"的核心断言。
     const halfMm = 0.90; // v3.9.5 路宽加倍
-    final expNS = halfMm / 1000 * scaleNS;
+    final expNS = halfMm;
     final nsRoad = BasemapData(
       roads: [
         RoadPoly(
@@ -449,7 +453,7 @@ void main() {
     expect(tNS.contains('Infinity'), isFalse);
 
     // 东西向：水平路 → 描边偏移在 Y
-    final expEW = halfMm / 1000 * scaleEW;
+    final expEW = halfMm;
     final ewRoad = BasemapData(
       roads: [
         RoadPoly(

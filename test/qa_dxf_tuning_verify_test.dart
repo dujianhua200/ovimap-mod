@@ -150,10 +150,11 @@ double _halfWmm(RoadGrade g) => switch (g) {
       RoadGrade.other => 0.20,
     };
 
-double _halfWm(RoadGrade g) => _halfWmm(g) / 1000 * kScale;
+// v3.12 口径（对齐用户插件 66.dxf）：纸面毫米**直接**= 图纸单位，
+// 不再 `mm / 1000 * 比例`（旧口径在 1:3000 下会放大 3 倍）。
+double _halfWm(RoadGrade g) => _halfWmm(g);
 
-double _clampH(RoadGrade g) =>
-    math.min(_halfWm(g) * 2 * 0.6, 2.0 / 1000 * kScale);
+double _clampH(RoadGrade g) => math.min(_halfWm(g) * 2 * 0.6, 2.0);
 
 /// 水平路：恒纬度（投影后 y=0），自西向东 len 米。
 RoadPoly _hRoad(String name, RoadGrade g, double len, {double lat = 0}) =>

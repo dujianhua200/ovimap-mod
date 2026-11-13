@@ -32,7 +32,7 @@ void main() {
     await deleteTempDirResilient(dir);
   });
 
-  test('距离标注字高按纸面 2.5mm 换算（不是 2.5 米）', () async {
+  test('距离标注字高 = 纸面 2.5mm（与用户插件口径一致）', () async {
     final r = await DxfExporter.export(
         name: 'style_juli', labels: _route(), version: DxfVersion.r2000);
     // DXF 以 GBK 写出（与其它导出用例同口径）。
@@ -47,8 +47,10 @@ void main() {
       if (m != null) juLi.add(double.parse(m.group(1)!));
     }
     expect(juLi, isNotEmpty, reason: '应有段距标注文字');
-    expect(juLi.every((h) => h < 2.5), isTrue,
-        reason: '段距字高必须是纸面 2.5mm 换算后的值（<2.5 图纸米），实测 $juLi');
+    // v3.12：纸面毫米 = 图纸单位（对齐用户插件 66.dxf 的实测字高 2.5）。
+    // 旧口径是 2.5/1000×比例（1:3000 → 7.5），与插件差 3 倍。
+    expect(juLi.every((h) => (h - 2.5).abs() < 0.01), isTrue,
+        reason: '段距字高应为 2.5（与插件一致），实测 $juLi');
   });
 
   test('道路宽度放大一倍（半宽表 ×2）', () async {

@@ -96,8 +96,9 @@ void main() {
         reason: '杆路不得是逐段 LINE；实际类型：$types');
     expect(types.contains('POLYLINE'), isTrue,
         reason: '杆路必须是多段线；实际类型：$types');
-    // 0.5mm @1:3000 = 1.5 绘图单位（米）
-    expect(txt, contains('40\n1.500\n'), reason: '全局宽度 0.5mm 换算应为 1.5');
+    // v3.12 口径（对齐用户插件）：纸面毫米直接=图纸单位 → 0.5mm 就是 0.5
+    expect(txt, contains('40\n0.500\n'),
+        reason: '全局宽度 0.5mm 应直接写 0.5（与插件一致，不再 ×比例）');
   });
 
   test('符号处断开：线不穿过符号本体（在符号边缘停止）', () async {
@@ -120,18 +121,18 @@ void main() {
     final polys = _polylines(_section(txt, 'ENTITIES'), 'GanLu');
     expect(polys, isNotEmpty, reason: '应有杆路多段线');
 
-    // 断开效果 = 画出部分相对原始间距"少了多少"。
-    // 用第一条的起点到最后一个点的总跨距衡量（同一链内断开后仍共线）。
+    // 断开效果：可见跨距应比原始间距**短掉两个符号半宽**。
+    //
+    // v3.12 口径：图块按 1:1 插入 → gl001 半宽 = 1.575 图纸单位
+    // （旧口径 ×3 时是 4.65）。原始间距 44.2，缩进后约 44.2-3.15≈41.05。
     final all = [for (final p in polys) ...p];
     expect(all.length, greaterThanOrEqualTo(2), reason: '应有可量长度');
     final span = _len(all);
-    // 原始两点间距（米）：0.0004° 纬度 ≈ 44.2m
     const original = 44.2;
-    expect(span, lessThan(original - 6),
-        reason: '断开后可见跨距应明显短于原始间距（两端各缩进符号半宽），'
-            '实际 $span');
-    expect(span, greaterThan(original - 20),
-        reason: '不应缩得过多，否则线看起来断了；实际 $span');
+    expect(span, lessThan(original - 2.5),
+        reason: '断开后可见跨距应短于原始间距（两端各缩进符号半宽），实际 $span');
+    expect(span, greaterThan(original - 5.0),
+        reason: '缩进量应≈两个符号半宽（1.575×2≈3.15），实际 $span');
   });
 
   test('两点完全重合：不画零长线（避免垃圾实体）', () async {
