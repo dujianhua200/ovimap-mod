@@ -160,6 +160,15 @@ class DxfExporter {
     /// 常用键：`BiaoQian`（符号）、`JuLi`（距离数字）、`GanLu`（杆路线）、
     /// `ZhuangHao`（桩号）、`DiMing`（地名）等，与 `DxfLayers.all` 的图层名一致。
     Map<String, int> colorOverrides = const {},
+
+    /// 距离标注字高（纸面毫米）。默认 2.5 —— 用户可自行修改。
+    double distFontMm = 2.5,
+
+    /// 符号（图块）缩放倍率。默认 1.0 —— 用户可放大缩小符号。
+    ///
+    /// **只影响图块本身**；杆路断开的间隙会跟着符号尺寸自动调整，
+    /// 所以无论缩放到多少，线与符号始终相接（不脱开、不留大缝）。
+    double symbolScale = 1.0,
   }) async {
     final warnings = <String>[];
     final dir = await LabelStore.instance.exportDir();
@@ -284,7 +293,7 @@ class DxfExporter {
     // 图幅比例已在上面（坐标换算前）算好：routeScale。
     // 字高按**纸面毫米**（v3.13 口径：1 纸面毫米 = 1 图纸单位）。
     // 用户插件实测：字高 2.5、线宽 0.5、块按 1:1 插入。
-    final segFontM = _mmOf(2.5, routeScale);
+    final segFontM = _mmOf(distFontMm, routeScale);
     final subFontM = _mmOf(1.6, routeScale);
     final labelFontM = _mmOf(2.0, routeScale);
     final noteFontM = _mmOf(1.5, routeScale);
@@ -386,7 +395,15 @@ class DxfExporter {
       // 现场叫"块中间有连线"。所以按符号**实际半宽**把该段两端各缩进，
       // 线只画到符号边缘为止。
       final lineWidthM = _mmOf(rodLineWidthMm, routeScale);
-      _appendRodPolyline(c, chain, cart, routeScale, lineWidthM, version);
+      // 断开半径 = 符号真实半宽 × 用户缩放倍率 × **0.88 收缩系数**。
+      //
+      // 用户反馈："线与图块的间隙也大"。原实现用符号包络的半宽（外接圆），
+      // 而实际符号多为矩形，对角线方向留出太多空白。
+      // 取 0.88 让线稍微**探进**符号边缘一点，视觉上"线与符号相接"，
+      // 不再是一大截空白。倍率变化时间隙同步缩放 —— 无论标签放大到几倍，
+      // 线始终贴着符号（用户的明确要求）。
+      _appendRodPolyline(c, chain, cart, routeScale, lineWidthM, version,
+          symbolScale: symbolScale);
 
       var chainCum = globalCum;
       for (var i = 1; i < chain.length; i++) {
@@ -444,6 +461,16 @@ class DxfExporter {
     // 标签符号按图例转成 CAD 符号块（INSERT 引用，可在 CAD 中整体编辑）。
     // 轨迹/无标签点不输出符号。
     if (includeLabelSymbols) {
+      // **每个点处的线路方向角（度）**：符号与标注随线路方向旋转。
+      //
+      // 现场图纸惯例：井/箱盖是矩形，顺着杆路摆放才看得顺。
+      // 原来 INSERT 的 50 组码固定 0，所有井朝向一致（用户反馈：
+      // "井为什么方向一直是一个，可不可以随线的方向"）。
+      //
+      // 算法：取该点相邻两杆的方向均值（转角处自然过渡）；
+      // 只有一条链时用链内相邻点；孤立点则 0°。
+      final dirAt = _directionDegAt(labels, baseLon, baseLat, scaleX, scaleY);
+
       // 符号插入缩放：**1.0**（图块按原尺寸插入）。
       //
       // 依据用户插件实测：`gl003` 块定义 3.0 单位、插入 xscale=1.0，
@@ -451,7 +478,7 @@ class DxfExporter {
       // （1:3000 → 3.0），符号被放大 3 倍，与插件画的差整整 3 倍。
       //
       // 图例库图块本身就是"纸面毫米"单位，1:1 插入即所见即所得的图例尺寸。
-      const symScale = 1.0;
+      final symScale = symbolScale; // 用户可调倍率（默认 1.0）
       final offUpM = _mmOf(3.0, routeScale); // 名称在符号上方 3mm
       final offDownM = _mmOf(4.0, routeScale); // 孔数/附加在下方 4mm
       final offNoteM = _mmOf(6.0, routeScale); // 备注 6mm
@@ -485,9 +512,16 @@ class DxfExporter {
         if (lt.isBlock) {
           final b = lt.block!;
           usedCatalogBlocks.add(lt.id);
-          // 图例块自身单位是"纸面毫米 @1:1"，与预置符号同口径 → 同一个 symScale。
-          // 对齐靠块定义的基点（_blockBaseOf），插入点即地图点。
-          _appendInsert(c, 'BiaoQian', lt.id, x, y, sx: symScale, sy: symScale);
+          // **符号随线路方向旋转**（用户口径："井的方向能不能随线的方向"）。
+          //
+          // 但**不是所有符号都该转**：杆、拉线、警示牌这类正立画更好认；
+          // 井、箱盖、人手孔这类矩形/椭圆符号顺着杆路摆放才符合现场习惯。
+          // 判据用图例分组（`LabelType.group`）：
+          //   井 / 箱体 / 人手孔 / 管道  → 随线旋转
+          //   杆 / 拉线 / 其它设施      → 保持正立（0°）
+          final rot = _shouldFollowRoute(lt) ? (dirAt[l.id] ?? 0.0) : 0.0;
+          _appendInsert(c, 'BiaoQian', lt.id, x, y,
+              sx: symScale, sy: symScale, rotDeg: rot);
           // 名称（可关）：图块本体只含图例里那一个代号字（如 gl004 里的「木」）。
           // 用户口径「块中间没有连线，没有原字」→ showLabelNames=false 时
           // 不再额外压一行名称，只留图块本身。
@@ -676,7 +710,7 @@ class DxfExporter {
   static void _text(_Ctx c, String layer, double x, double y, double h,
       String text,
       {double? angle,
-      bool style = false,
+      bool style = true,
       String? styleName,
       bool centered = false,
       bool liftAboveLine = false}) {
@@ -687,6 +721,15 @@ class DxfExporter {
     // 图框里的 MTEXT 富文本码正是这么带进来的 —— 在 frame_template 已清理，
     // 这里再加一道：任何来源的文字都保证只含安全字符。
     final t = _sanitizeDxfText(text);
+    // **默认就写中文样式**（v3.18）。
+    //
+    // 用户反馈"里面的字体都是乱码"，根因是大量 TEXT 没写组码 7（样式），
+    // 于是落回默认 `Standard` —— 而 Standard 是 `txt.shx`，
+    // 纯西文 SHX 字体，中文一律显示成 ??? 或方块。
+    //
+    // 逐个调用点补 `style: true` 太容易漏（图例、桩号、图签、地名…
+    // 十几处，且有的在换行后才写参数）。所以把默认值直接改成 true：
+    // 想用西文样式的调用方显式传 `style: false` 即可。
     final sn = styleName ?? (style ? 'SimSun' : null);
 
     // **文字居中：基线原点 + 手工位移**（v3.17）
@@ -788,13 +831,19 @@ class DxfExporter {
     List<List<double>> cart,
     int routeScale,
     double widthM,
-    DxfVersion version,
-  ) {
-    // 每个点的"断开半径"（地面米）：符号半宽，至少留 0.4mm 空隙。
+    DxfVersion version, {
+    double symbolScale = 1.0,
+  }) {
+    // 每个点的"断开半径"（图纸单位）：符号半宽 × 用户缩放 × 收缩系数。
+    //
+    // 0.88 的收缩：符号包络是外接尺寸（矩形取 maxSide/2），
+    // 线走到包络边会留一大截空白。略微探进去，视觉上才"相接"。
+    const shrink = 0.88;
     final radius = <double>[];
     for (final l in chain) {
       final halfMm = _symbolHalfSpanMm(l);
-      radius.add(_mmOf(halfMm <= 0 ? 0.4 : halfMm, routeScale));
+      final eff = (halfMm <= 0 ? 0.4 : halfMm) * symbolScale * shrink;
+      radius.add(_mmOf(eff, routeScale));
     }
 
     // 逐段生成"可见子段"（两端各缩进），再把首尾相接的子段合并成折线。
@@ -1111,7 +1160,7 @@ class DxfExporter {
           final txt = t.text.trim();
           if (txt.isEmpty) break;
           _text(c, 'TuQian', t.x + dx, t.y + dy, t.h <= 0 ? 2.5 : t.h,
-              txt, angle: t.rot);
+              txt, angle: t.rot, style: true);
       }
     }
   }
@@ -1300,8 +1349,14 @@ class DxfExporter {
       required double totalLength,
       required int scale}) {
     const w = 120.0, h = 30.0;
-    final x0 = maxX - w, y0 = minY;
-    final x1 = maxX, y1 = minY + h;
+    // 图签放在**内容下方之外**（v3.18）。
+    //
+    // 原来画在 minY（内容底边）上，正好压在杆路上 —— 用户看到的
+    // "一个长方框，不知道是什么"，就是它。
+    // 现在整体下移到内容下方 6 个单位处，不再与图面重叠。
+    const gapBelow = 6.0;
+    final x0 = maxX - w, y0 = minY - gapBelow - h;
+    final x1 = maxX, y1 = minY - gapBelow;
     const rowH = h / 5; // 5 行分格
     _appendRect(c, 'TuQian', x0, y0, x1, y1);
     for (var i = 1; i < 5; i++) {
@@ -1497,13 +1552,91 @@ class DxfExporter {
   /// 图例库块不走这里：它们的几何中心未必在 (0,0)（如拉线块整体在 x=0..10
   /// 一侧），对齐靠 **BLOCK 定义里的基点**（组码 10/20），不是靠 INSERT 偏移
   /// ——INSERT 的 11/21 是"属性对齐点"，不是几何平移，用了只会让块跑位。
+  /// 该符号是否应**随线路方向旋转**。
+  ///
+  /// 现场习惯：井盖、人手孔、箱体这类矩形符号顺着杆路摆；
+  /// 杆、拉线、警示牌等正立符号转了反而更难认。
+  ///
+  /// 判据优先用**图例分组**（`LabelType.group`，来自 lispblock.dxf 的图例栏）：
+  ///   杆   → 不转（原有水泥杆、新建木杆…）
+  ///   井   → 转  （人井、手孔、单/双/三页井…）
+  ///   拉线 → 不转
+  ///   设施 → 按名称关键词判断（箱/管/盖 转，牌/标 不转）
+  static bool _shouldFollowRoute(LabelType lt) {
+    // ① 分组说得很清楚的，直接定
+    if (lt.group == '杆' || lt.group == '拉线') return false;
+    if (lt.group == '井') return true;
+
+    // ② 其余按名称关键词
+    final name = lt.name;
+    for (final k in const ['杆', '拉线', '拉', '警示', '牌', '标', '砖', '墩']) {
+      if (name.contains(k)) return false;
+    }
+    for (final k in const ['井', '孔', '箱', '管', '篦', '盖']) {
+      if (name.contains(k)) return true;
+    }
+    // ③ 兜底：不转（保守 —— 转了不好认的代价 > 不转）
+    return false;
+  }
+
+  /// 每个标签点处的**线路方向角**（度，屏幕/CAD 坐标系的逆时针角）。
+  ///
+  /// 用途：让井/箱这类矩形符号**顺着杆路摆放**（现场图纸惯例），
+  /// 而不是所有符号都朝一个方向。
+  ///
+  /// 取法：
+  ///  · 找到该点所在的链（`buildLabelChains`），取它在链中的前/后邻；
+  ///  · 有前后邻 → 用两者连线方向（转角处自然过渡）；
+  ///  · 只有一侧 → 用那一侧的方向；
+  ///  · 孤立点 → 0°。
+  static Map<String, double> _directionDegAt(List<MapLabel> labels,
+      double baseLon, double baseLat, double scaleX, double scaleY) {
+    final out = <String, double>{};
+    List<double> xy(MapLabel l) =>
+        [(l.lon - baseLon) * scaleX, (l.lat - baseLat) * scaleY];
+
+    for (final chain in buildLabelChains(labels)) {
+      if (chain.length < 2) continue;
+      for (var i = 0; i < chain.length; i++) {
+        final cur = xy(chain[i]);
+        List<double>? prev = i > 0 ? xy(chain[i - 1]) : null;
+        List<double>? next = i < chain.length - 1 ? xy(chain[i + 1]) : null;
+        double dx, dy;
+        if (prev != null && next != null) {
+          // 转角处：前后邻连线，方向更稳
+          dx = next[0] - prev[0];
+          dy = next[1] - prev[1];
+        } else if (next != null) {
+          dx = next[0] - cur[0];
+          dy = next[1] - cur[1];
+        } else if (prev != null) {
+          dx = cur[0] - prev[0];
+          dy = cur[1] - prev[1];
+        } else {
+          continue;
+        }
+        if (dx.abs() < 1e-9 && dy.abs() < 1e-9) continue;
+        out[chain[i].id] = math.atan2(dy, dx) * 180 / math.pi;
+      }
+    }
+    return out;
+  }
+
+
+  ///
+  /// [rotDeg]：旋转角（度）。**符号随线路方向**是现场图纸的惯例 ——
+  /// 井/箱盖多为矩形，顺着杆路摆放才看得顺；原来固定 50=0，
+  /// 结果所有井方向一致（用户反馈："井为什么方向一直是一个"）。
   static void _appendInsert(
       _Ctx c, String layer, String name, double x, double y,
-      {double sx = 1, double sy = 1}) {
+      {double sx = 1, double sy = 1, double rotDeg = 0}) {
     c.ent('INSERT', layer, 'AcDbBlockReference');
+    // 角度归一到 [0,360)，避免 -0.0 之类
+    var rot = rotDeg % 360;
+    if (rot < 0) rot += 360;
     c.sb.write('2\n$name\n'
         '10\n${_fmt(x)}\n20\n${_fmt(y)}\n30\n0\n'
-        '41\n${_fmt(sx)}\n42\n${_fmt(sy)}\n50\n0\n');
+        '41\n${_fmt(sx)}\n42\n${_fmt(sy)}\n50\n${rot.toStringAsFixed(1)}\n');
   }
 
   // ================= 配线图（DXF 内自动生成） =================
@@ -1753,13 +1886,15 @@ class DxfExporter {
 
   /// 近似居中 TEXT：汉字按全宽、字母数字按半宽估宽。
   static void _appendTextCentered(_Ctx c, String layer,
-      double cx, double cy, double h, String text) {
+      double cx, double cy, double h, String text, {bool style = true}) {
     if (text.isEmpty) return;
     var w = 0.0;
     for (final r in text.runes) {
       w += r > 0x2E7F ? h : h * 0.55;
     }
-    _text(c, layer, cx - w / 2, cy - h * 0.35, h, text);
+    // **必须显式指定样式**：默认 Standard 是 txt.shx（纯西文 SHX），
+    // 中文会显示成问号/乱码。用户反馈"里面的字体都是乱码"即此。
+    _text(c, layer, cx - w / 2, cy - h * 0.35, h, text, style: style);
   }
 
   // ---- 通用 ----

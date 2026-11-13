@@ -1069,6 +1069,10 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
   var distColor = prefs.getInt('dxfDistColor') ?? 0;
   var rodColor = prefs.getInt('dxfRodColor') ?? 0;
 
+  // —— 字体高度与标签倍率（用户可调）——
+  var distFontMm = prefs.getDouble('dxfDistFontMm') ?? 2.5;
+  var symbolScale = prefs.getDouble('dxfSymbolScale') ?? 1.0;
+
   // —— 搜索/兜底 key（导出与"底图检测"共用同一份，口径一致）——
   // 天地图 key：用户自定义优先，未配置则用内置兜底（单一来源）
   final userKey = prefs.getString(AppState.prefTdtKey)?.trim() ?? '';
@@ -1293,6 +1297,43 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
             value: useFrame,
             activeColor: kAccent,
             onChanged: (v) => setSt(() => useFrame = v ?? true),
+          ),
+          // —— 字高与倍率（用户可调）——
+          Padding(
+            padding: const EdgeInsets.only(top: 6, bottom: 2),
+            child: Row(children: [
+              const Text('距离字高(mm)',
+                  style: TextStyle(color: kTextMain, fontSize: 13)),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 74,
+                child: TextFormField(
+                  initialValue: distFontMm.toString(),
+                  style: const TextStyle(color: kTextMain, fontSize: 13),
+                  decoration: dec('2.5'),
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  onChanged: (v) =>
+                      distFontMm = double.tryParse(v.trim()) ?? 2.5,
+                ),
+              ),
+              const SizedBox(width: 16),
+              const Text('标签倍数',
+                  style: TextStyle(color: kTextMain, fontSize: 13)),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 74,
+                child: TextFormField(
+                  initialValue: symbolScale.toString(),
+                  style: const TextStyle(color: kTextMain, fontSize: 13),
+                  decoration: dec('1'),
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  onChanged: (v) =>
+                      symbolScale = double.tryParse(v.trim()) ?? 1.0,
+                ),
+              ),
+            ]),
           ),
           // —— 出图颜色（用户口径：不要只有黑色，要好几种可选）——
           Padding(
@@ -1565,6 +1606,8 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
         prefs.setInt('dxfLabelColor', labelColor);
         prefs.setInt('dxfDistColor', distColor);
         prefs.setInt('dxfRodColor', rodColor);
+        prefs.setDouble('dxfDistFontMm', distFontMm);
+        prefs.setDouble('dxfSymbolScale', symbolScale);
         toast(context, '正在生成 DXF…');
         try {
           final corridor =
@@ -1609,6 +1652,9 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
               if (distColor != 0) 'JuLi': distColor,
               if (rodColor != 0) 'GanLu': rodColor,
             },
+            // 字高与符号倍率（用户可调；断线间隙随倍率自适应）
+            distFontMm: distFontMm,
+            symbolScale: symbolScale,
           );
           if (context.mounted) {
             // 非致命警告 / 底图三态结构化说明（文件仍正常分享）

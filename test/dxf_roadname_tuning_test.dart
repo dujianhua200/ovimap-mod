@@ -304,9 +304,12 @@ void main() {
       for (final t in juliTexts) {
         expect(t.first('7'), 'SimSun', reason: '${v.name}: 业务文字样式不应改变');
       }
-      // 建筑名文字无 7 组码（既有样式不动，不应引用 SongTi）
+      // 建筑名也必须带中文样式（v3.18）：
+      // 原来这里断言 `isNull`（不写 7 组码），但那样会落回 Standard(txt.shx)
+      // —— 纯西文 SHX 字体，中文显示成乱码。用户反馈"字体都是乱码"即此。
       for (final t in _on(_entities(text), 'TEXT', 'JianZhu')) {
-        expect(t.first('7'), isNull, reason: '${v.name}: 建筑名样式不应改变');
+        expect(t.first('7'), 'SimSun',
+            reason: '${v.name}: 建筑名必须显式用中文样式，否则乱码');
       }
     }
     dir.deleteSync(recursive: true);

@@ -398,11 +398,13 @@ void main() {
         for (final t in doc.on('TEXT', 'DaoLu')) {
           expect(t.first('7'), 'SongTi', reason: '${v.name}: 路名一律 SongTi');
         }
-        // 其他底图文字不得被波及：DiMing / JianZhu 不写 7 组码（走默认 STANDARD）
+        // 地名/建筑也必须带中文样式（v3.18）：
+        // 原来断言"不写 7 组码（走默认 STANDARD）"，但 Standard 是 txt.shx
+        // —— 纯西文 SHX 字体，中文一律乱码。用户反馈"字体都是乱码"即此。
         for (final layer in ['DiMing', 'JianZhu']) {
           for (final t in doc.on('TEXT', layer)) {
-            expect(t.first('7'), isNull,
-                reason: '${v.name}: $layer 文字样式不应被改动');
+            expect(t.first('7'), 'SimSun',
+                reason: '${v.name}: $layer 必须显式中文样式，否则乱码');
           }
         }
         // 全文件层面：出现 7 组码的 TEXT 只允许 SongTi / SimSun 两种
