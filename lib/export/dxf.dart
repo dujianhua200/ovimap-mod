@@ -407,9 +407,10 @@ class DxfExporter {
         final segText = GeoUtil.segTextFor(b, _formatDistNoUnit(segmentDistance),
             prefix: segPrefix);
         // 宋体（STYLE 表里注册的是 SimSun）；字高 2.5 —— 用户指定。
-        // **居中**：让数字正好压在线段中间（原来以左下角为基点，偏右上）。
+        // 水平居中在线段中点，**垂直方向浮在线条上方**：
+        // 汉字压在线上会和杆路线叠在一起，看着"怪"（用户原话）。
         _text(c, 'JuLi', mx, my, segFontM, segText,
-            angle: angle, style: true, centered: true);
+            angle: angle, style: true, centered: true, liftAboveLine: true);
         // 盘留标注（段下方第一行）
         var extraY = my - 3.4;
         if (b.slackM > 0) {
@@ -677,7 +678,8 @@ class DxfExporter {
       {double? angle,
       bool style = false,
       String? styleName,
-      bool centered = false}) {
+      bool centered = false,
+      bool liftAboveLine = false}) {
     // **DXF 文字净化（关键防线）**
     //
     // 组码 1 是单行文本值：里面出现裸的 `\`、`{`、`}` 会让 CAD 解析失败，
@@ -686,19 +688,41 @@ class DxfExporter {
     // 这里再加一道：任何来源的文字都保证只含安全字符。
     final t = _sanitizeDxfText(text);
     final sn = styleName ?? (style ? 'SimSun' : null);
+
+    // **文字居中：基线原点 + 手工位移**（v3.17）
+    //
+    // ## 为什么不再用 72/73 对齐码
+    // 用户实测："距离不是在线的中间，是在线的上方"。
+    // 我们确实写了 `72=1`（水平居中）、`73=2`（垂直居中）+ 对齐点 11/21，
+    // 数据完全合规。但 `73=2` 依赖 CAD **自己去量字形包围盒**：
+    //   · 中文字形的上下留白不对称，按包围盒居中必然偏上；
+    //   · 不少国产 CAD / 看图软件对 R12 的 73 支持不完整，直接忽略，
+    //     于是退回"基线在给定点" —— 文字整体抬到线上方。
+    //
+    // ## 现在的做法（v3.17 第二次修正）
+    // 用户反馈"距离数字在线条上方，不在中间" —— 排查发现坐标本身就在线段
+    // 中点（偏差 0.00），真正的问题是 **`73=2` 垂直居中被忽略**，
+    // 导致文字退回"基线在给定点"，字身整体抬到线以上。
+    //
+    // 改为：**不写 73**，垂直位置由我们自己按字高算死。
+    //   · 水平：72=1（水平居中，所有 CAD 都支持）；
+    //   · 垂直：把插入点下移 0.35×字高，让字身**压在线上**（视觉居中）；
+    //   · 另给 0.55×字高 的上移量选项（`liftAboveLine`），
+    //     让标注**明显浮在线条上方**，避免与线重叠、看着乱。
+    //
+    // 0.35 的来历：宋体汉字字身约占 em 的 0.86，基线到字身中心 ≈0.35em。
+    final yAdj = centered ? y - h * 0.35 + h * (liftAboveLine ? 0.95 : 0) : y;
+
     c.ent('TEXT', layer, 'AcDbText');
     if (sn != null) c.sb.write('7\n$sn\n');
-    c.sb.write('10\n${_fmt(x)}\n20\n${_fmt(y)}\n30\n0\n40\n${_fmt(h)}\n');
+    c.sb.write(
+        '10\n${_fmt(x)}\n20\n${_fmt(yAdj)}\n30\n0\n40\n${_fmt(h)}\n');
     if (angle != null) c.sb.write('50\n${angle.toStringAsFixed(1)}\n');
     if (centered) {
-      // **文字居中**（用户口径："导出的 DXF 距离数字不在中间"）。
-      //
-      // DXF 的 TEXT 默认以**左下角**为基点（组码 10/20），
-      // 直接把线段中点写进 10/20，文字就会整体偏向右上方。
-      // 正确做法：72=1（水平居中）、73=2（垂直居中），
-      // 再用 11/21 给出**对齐点**（这里就是线段中点），10/20 保留同值。
-      c.sb.write('72\n1\n73\n2\n');
-      c.sb.write('11\n${_fmt(x)}\n21\n${_fmt(y)}\n31\n0\n');
+      // 只给水平居中（72=1），对齐点与插入点一致。
+      // 不写 73：避免各 CAD 对"垂直居中"理解不一致导致偏移。
+      c.sb.write('72\n1\n');
+      c.sb.write('11\n${_fmt(x)}\n21\n${_fmt(yAdj)}\n31\n0\n');
     }
     c.sb.write('1\n$t\n');
     if (c.r2000) c.sb.write('100\nAcDbText\n');
