@@ -15,7 +15,6 @@
 library;
 
 import 'dart:convert' show latin1, LineSplitter;
-import 'dart:io' show gzip;
 import 'dart:math' as math;
 
 import 'package:flutter/services.dart' show rootBundle;
