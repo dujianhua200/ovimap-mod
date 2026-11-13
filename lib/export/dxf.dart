@@ -207,10 +207,45 @@ class DxfExporter {
     // 本地投影基准点（第一个点）
     final baseLon = labels.first.lon;
     final baseLat = labels.first.lat;
-    final scaleX = 111320.0 * math.cos(baseLat * math.pi / 180);
-    const scaleY = 110540.0;
+    // 经纬度 → **真实米** 的投影系数。
+    final metersPerDegX = 111320.0 * math.cos(baseLat * math.pi / 180);
+    const metersPerDegY = 110540.0;
 
-    // 实体包围盒（米，本地坐标）：用于图签/指北针定位，随周边矢量扩展
+    // 实体包围盒（**真实米**，本地坐标）：先算出范围，再据此定比例。
+    var rawMinX = 0.0, rawMinY = 0.0, rawMaxX = 0.0, rawMaxY = 0.0;
+    for (final l in labels) {
+      final x = (l.lon - baseLon) * metersPerDegX;
+      final y = (l.lat - baseLat) * metersPerDegY;
+      if (x < rawMinX) rawMinX = x;
+      if (x > rawMaxX) rawMaxX = x;
+      if (y < rawMinY) rawMinY = y;
+      if (y > rawMaxY) rawMaxY = y;
+    }
+
+    // 出图比例：用户可固定（现场统一 1:3000），否则按线路范围自动估算。
+    final routeScale = fixedScale != null && fixedScale > 0
+        ? fixedScale
+        : _pickScale(rawMinX, rawMinY, rawMaxX, rawMaxY);
+
+    // ---------------------------------------------------------------
+    // **图纸单位换算（v3.13 关键修正）**
+    //
+    // 用户插件在 1:3000 下，图面 1 单位 = 实地 3 米
+    // （3000 毫米 = 3 米），即 `1 单位 = 比例/1000 米`。
+    //
+    // 实测依据（66.dxf 里插件画的杆路）：
+    //   · 中位档距 15.7 图面单位 → 实地约 47 米（15.7 × 3）
+    //   · 我们原按 1 单位 = 1 米 → 同一段画成 47 单位，图面大 3 倍
+    //
+    // 所以：所有几何坐标都要 **除以 (比例/1000)**。
+    // 注意：**距离数值（段距文字）不受影响** —— 那是真实米数，
+    // 由 haversine 单独算，与图面单位无关。
+    // ---------------------------------------------------------------
+    final unitsPerMeter = routeScale / 1000.0; // 1:3000 → 3.0
+    final scaleX = metersPerDegX / unitsPerMeter;
+    final scaleY = metersPerDegY / unitsPerMeter;
+
+    // 实体包围盒（图纸单位）
     var extMinX = 0.0, extMinY = 0.0, extMaxX = 0.0, extMaxY = 0.0;
     for (final l in labels) {
       final x = (l.lon - baseLon) * scaleX;
@@ -227,15 +262,9 @@ class DxfExporter {
     // 全线桩号沿链输出顺序一杆接一杆递增（与竣工里程口径一致）。
     var globalCum = 0.0;
 
-    // 图幅比例：**只按线路范围估算**（不被过大的底图外扩拖大），
-    // 用于所有底图线宽/字号的「纸面毫米 → 图纸米」换算，图签亦报此比例（N5 修正）。
-    // 出图比例：用户可固定（现场统一 1:3000），否则按线路范围自动估算。
-    // 固定后所有"纸面毫米"换算（字高/符号/线宽/偏移）都跟着走，不再随线路长度漂移。
-    final routeScale = fixedScale != null && fixedScale > 0
-        ? fixedScale
-        : _pickScale(extMinX, extMinY, extMaxX, extMaxY);
-    // 字高按**纸面毫米**换算（v3.9.5）：此前直接写 2.5/3 被当作 2.5 米，
-    // 图上极其巨大。用户要求：距离 2.5mm（宋体），其余与它和谐匹配。
+    // 图幅比例已在上面（坐标换算前）算好：routeScale。
+    // 字高按**纸面毫米**（v3.13 口径：1 纸面毫米 = 1 图纸单位）。
+    // 用户插件实测：字高 2.5、线宽 0.5、块按 1:1 插入。
     final segFontM = _mmOf(2.5, routeScale);
     final subFontM = _mmOf(1.6, routeScale);
     final labelFontM = _mmOf(2.0, routeScale);
@@ -1762,8 +1791,12 @@ class DxfExporter {
     final cart = <List<double>>[
       for (final p in rp.pts) [(p[1] - baseLon) * scaleX, (p[0] - baseLat) * scaleY]
     ];
-    // 按等级分档简化（主干细容差保留形态，小路大容差瘦身，N4）
-    final simp = _simplifyPath(cart, _roadTolM(rp.grade));
+    // 按等级分档简化（主干细容差保留形态，小路大容差瘦身，N4）。
+    //
+    // ⚠️ 容差是"米"，而 cart 已是"图纸单位"（v3.13 起 1 单位 = 比例/1000 米）。
+    // 不换算的话，1:3000 下容差会被放大 3 倍解读 —— 主干道会被削得过头。
+    final unitsPerMeter = scale / 1000.0;
+    final simp = _simplifyPath(cart, _roadTolM(rp.grade) / unitsPerMeter);
     if (simp.length < 2) return;
 
     // 双线描边（casing）：半宽 = 纸面半宽 ÷ 1000 × 比例
@@ -1817,7 +1850,13 @@ class DxfExporter {
     if (totalLen < 1e-6) return;
     // 每约 200 米一处：n 处均匀分布，第 i 处（i=1..n）在弧长 totalLen*(2i-1)/(2n)
     //（n=1 时正好中点）
-    final n = math.max(1, (totalLen / 200).round());
+    // 每约 200 **米**一处：n 处均布，第 i 处在弧长 totalLen*(2i-1)/(2n)（n=1 时中点）。
+    //
+    // 注意：pts 是**图纸单位**（v3.13 起 1 单位 = 比例/1000 米），
+    // 所以「200 米」要先换算成图纸单位；否则 1:3000 下会被当成
+    // 200 单位 = 600 米，路名数量会少 3 倍。
+    final spacingUnits = 200.0 / (scale / 1000.0);
+    final n = math.max(1, (totalLen / spacingUnits).round());
     var walked = 0.0; // 已走过弧长
     var idx = 1;
     for (var i = 1; i < pts.length && idx <= n; i++) {

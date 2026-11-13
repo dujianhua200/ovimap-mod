@@ -40,8 +40,14 @@ void main() {
       expect(BundledBasemap.covers(114.05, 32.10, 114.10, 32.15), isTrue);
       // 武汉（范围外）
       expect(BundledBasemap.covers(114.25, 30.55, 114.35, 30.62), isFalse);
-      // 跨出边界（部分在内也不算）
-      expect(BundledBasemap.covers(115.5, 32.10, 116.0, 32.20), isFalse);
+      // 跨出边界但**有交集** → v3.13 起算覆盖（越界部分自然无数据）
+      //
+      // 旧语义是"完全包含才算"，线路稍压县界就整块跳过兜底 ——
+      // 这正是用户三次反馈"地图包没用上"的原因之一。
+      expect(BundledBasemap.covers(115.5, 32.10, 116.0, 32.20), isTrue,
+          reason: '有交集即覆盖（越界部分由 bbox 查询自然过滤）');
+      // 完全在外（东侧 116.0 之外）
+      expect(BundledBasemap.covers(116.2, 32.10, 116.5, 32.20), isFalse);
     });
 
     test('实际加载：道路/地名/建筑都能按 bbox 查到', () async {
@@ -93,11 +99,11 @@ void main() {
       expect(z19, greaterThan(z16), reason: '继续放大继续变大');
       // 16 级为基准 1.0
       expect(z16, closeTo(1.0, 1e-6));
-      // 边界
-      expect(labelScaleForZoomForTest(0), closeTo(0.45, 1e-6),
+      // 边界（v3.13：用户反馈标签太大，上下限一并下调）
+      expect(labelScaleForZoomForTest(0), closeTo(0.40, 1e-6),
           reason: '远景应有下限，否则看不见');
-      expect(labelScaleForZoomForTest(24), closeTo(3.2, 1e-6),
-          reason: '近景应有上限，否则糊满屏幕');
+      expect(labelScaleForZoomForTest(24), closeTo(2.0, 1e-6),
+          reason: '近景上限 2.0（原 3.2 会糊满屏幕）');
     });
 
     test('缩放倍率不会为 0 或负数（否则 Marker 尺寸非法）', () {

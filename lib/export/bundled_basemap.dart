@@ -29,14 +29,26 @@ import 'dart:io' show Platform, gzip;
 
 import 'package:flutter/services.dart' show rootBundle;
 
-/// 数据覆盖范围（信阳市，WGS84 经纬度）。
+/// 数据覆盖范围（WGS84 经纬度）。
 ///
-/// 超出这个范围就没有内置数据 —— 必须靠联网抓取，调用方据此给出提示，
-/// 而不是"静默返回空、用户以为是软件坏了"。
-const double kBundledLonMin = 113.7;
-const double kBundledLonMax = 115.6;
-const double kBundledLatMin = 31.2;
-const double kBundledLatMax = 32.6;
+/// ⚠️ 这组常量必须**小于等于数据实际范围**，否则 `covers()` 会把
+/// "明明有数据的地方"判成没数据，兜底被静默跳过。
+///
+/// 实测（assets/buildings/*.geojson.gz 真实包围盒）：
+///   roads     lon 113.690~115.629  lat 31.160~32.679
+///   places    lon 113.699~115.600  lat 31.200~32.596
+///   buildings lon 113.723~115.932  lat 31.393~32.664
+///
+/// 取**三者交集**再各留 0.02° 余量：
+///   lon 113.72 ~ 115.58   lat 31.41 ~ 32.58
+///
+/// 早期写的 113.7~115.6 / 31.2~32.6 比 buildings 的实际下界还宽，
+/// 于是"建筑那一片"永远判不覆盖 —— 这就是用户三次反馈
+/// "地图包好像没起作用"的真正原因。
+const double kBundledLonMin = 113.72;
+const double kBundledLonMax = 115.58;
+const double kBundledLatMin = 31.41;
+const double kBundledLatMax = 32.58;
 
 /// 内置数据版本。换包时递增，便于诊断"用户装的是旧包"。
 const int kBundledBasemapVersion = 1;
@@ -135,15 +147,28 @@ class BundledBasemap {
   bool get placesLoaded => _places.isNotEmpty;
   bool get buildingsLoaded => _buildingRings.isNotEmpty;
 
-  /// 数据是否覆盖给定 bbox（完全落在信阳范围内才算）。
+  /// 给定 bbox **是否与内置数据范围有交集**。
+  ///
+  /// v3.13 由"完全包含"改为"**相交即可**"：
+  /// 原来要求 `lonMin >= 边界 && lonMax <= 边界`，线路只要稍微越界
+  /// （勘察常压着县界走）就整块跳过兜底 —— 用户三次反馈"地图包没用上"。
+  /// 正确的语义是：**有交集就补**，越界部分自然没有数据（查询时按 bbox 过滤）。
   static bool covers(double lonMin, double latMin, double lonMax, double latMax) {
-    return lonMin >= kBundledLonMin &&
-        lonMax <= kBundledLonMax &&
-        latMin >= kBundledLatMin &&
-        latMax <= kBundledLatMax;
+    // 不相交才返回 false
+    if (lonMax < kBundledLonMin || lonMin > kBundledLonMax) return false;
+    if (latMax < kBundledLatMin || latMin > kBundledLatMax) return false;
+    return true;
   }
 
+  /// 加载失败的**可观测**记录（每类数据一条）。
+  ///
+  /// 早期这里全是 `catch (_) {}` 静默吞掉 —— 数据没加载上，用户只看到
+  /// "地图包好像没起作用"，我们却拿不到任何线索。现在把异常收进
+  /// [loadErrors] 并暴露到 [summary]，便于现场排查。
+  final List<String> loadErrors = [];
+
   Future<void> _load() async {
+    final sw = Stopwatch()..start();
     try {
       final txt = await _readGz(kBundledRoadsAsset);
       for (final f in _features(txt)) {
@@ -161,7 +186,9 @@ class BundledBasemap {
         _roads.add(road);
         _extendRoadBox(road);
       }
-    } catch (_) {}
+    } catch (e) {
+      loadErrors.add('道路：$e');
+    }
 
     try {
       final txt = await _readGz(kBundledPlacesAsset);
@@ -182,7 +209,9 @@ class BundledBasemap {
         _pMinLon = lon < _pMinLon ? lon : _pMinLon;
         _pMaxLon = lon > _pMaxLon ? lon : _pMaxLon;
       }
-    } catch (_) {}
+    } catch (e) {
+      loadErrors.add('地名：$e');
+    }
 
     try {
       final txt = await _readGz(kBundledBuildingsAsset);
@@ -204,8 +233,20 @@ class BundledBasemap {
           }
         }
       }
-    } catch (_) {}
+    } catch (e) {
+      loadErrors.add('建筑：$e');
+    }
+    _loaded = true;
+    _loadMs = sw.elapsedMilliseconds;
   }
+
+  /// 是否已经跑过 [_load]（无论成功失败）。
+  bool _loaded = false;
+  bool get loadedOnce => _loaded;
+
+  /// 上次加载耗时（毫秒），用于诊断"是不是加载太慢/超时"。
+  int _loadMs = 0;
+  int get loadMs => _loadMs;
 
   void _extendRoadBox(BundledRoad r) {
     _rMinLat = r.minLat < _rMinLat ? r.minLat : _rMinLat;
@@ -310,8 +351,12 @@ class BundledBasemap {
     String box(double a, double b, double c, double d) =>
         a > 90 ? '无' : '${c.toStringAsFixed(2)},${a.toStringAsFixed(2)}'
             '~${d.toStringAsFixed(2)},${b.toStringAsFixed(2)}';
+    final errs = loadErrors.isEmpty
+        ? ''
+        : '\n加载异常：${loadErrors.join('；')}';
     return '道路 ${_roads.length} 条（${box(_rMinLat, _rMaxLat, _rMinLon, _rMaxLon)}）\n'
         '地名 ${_places.length} 个（${box(_pMinLat, _pMaxLat, _pMinLon, _pMaxLon)}）\n'
-        '建筑 ${_buildingRings.length} 栋（${box(_bMinLat, _bMaxLat, _bMinLon, _bMaxLon)}）';
+        '建筑 ${_buildingRings.length} 栋（${box(_bMinLat, _bMaxLat, _bMinLon, _bMaxLon)}）\n'
+        '耗时 ${_loadMs}ms$errs';
   }
 }

@@ -688,9 +688,11 @@ double labelScaleForZoomForTest(double zoom) => _labelScaleForZoom(zoom);
 
 double _labelScaleForZoom(double zoom) {
   const anchor = 16.0;
-  final raw = math.pow(1.25, zoom - anchor).toDouble();
-  if (raw < 0.45) return 0.45;
-  if (raw > 3.2) return 3.2;
+  // v3.13：基准倍率整体下调（用户反馈"地图上标签太大"）。
+  // 1.25 → 1.17 让近景增长更缓；上限 3.2 → 2.0 避免放大后糊住地物。
+  final raw = math.pow(1.17, zoom - anchor).toDouble();
+  if (raw < 0.40) return 0.40;
+  if (raw > 2.0) return 2.0;
   return raw;
 }
 

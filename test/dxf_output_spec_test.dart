@@ -128,7 +128,11 @@ void main() {
     final all = [for (final p in polys) ...p];
     expect(all.length, greaterThanOrEqualTo(2), reason: '应有可量长度');
     final span = _len(all);
-    const original = 44.2;
+    // v3.13：导出坐标按出图比例缩放（1:3000 → 1 单位 = 3 米），
+    // 所以「44.2 米」的原始间距在图上是 44.2/3 ≈ 14.73 单位；
+    // 符号半宽 1.575 单位（图块 1:1 插入），两端各缩进 → 可见跨度短约 3.15。
+    const originalM = 44.2;
+    final original = originalM / 3.0;
     expect(span, lessThan(original - 2.5),
         reason: '断开后可见跨距应短于原始间距（两端各缩进符号半宽），实际 $span');
     expect(span, greaterThan(original - 5.0),

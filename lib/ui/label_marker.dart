@@ -6,20 +6,20 @@ import '../models/label_type.dart';
 import '../models/map_label.dart';
 import 'desktop/symbol_library.dart' show DxfBlockThumb;
 
-/// 地图标签符号（按图例形状绘制）。
+/// 鍦板浘鏍囩绗﹀彿锛堟寜鍥句緥褰㈢姸缁樺埗锛夈€?
 ///
-/// 锚点约定：符号几何中心 = 地图点（连线接到符号外围中心）；
-/// 名称文字挂在符号下方，不影响锚点。
-/// 轨迹/无标签类型不画符号（只画连线+距离）。
+/// 閿氱偣绾﹀畾锛氱鍙峰嚑浣曚腑蹇?= 鍦板浘鐐癸紙杩炵嚎鎺ュ埌绗﹀彿澶栧洿涓績锛夛紱
+/// 鍚嶇О鏂囧瓧鎸傚湪绗﹀彿涓嬫柟锛屼笉褰卞搷閿氱偣銆?
+/// 杞ㄨ抗/鏃犳爣绛剧被鍨嬩笉鐢荤鍙凤紙鍙敾杩炵嚎+璺濈锛夈€?
 class LabelSymbol extends StatelessWidget {
   final MapLabel label;
   final bool selected;
   final double scale;
 
-  /// 用户可配的标签颜色（null = 用类型自带色）。
+  /// 鐢ㄦ埛鍙厤鐨勬爣绛鹃鑹诧紙null = 鐢ㄧ被鍨嬭嚜甯﹁壊锛夈€?
   ///
-  /// 用户口径："地图标签的颜色可以设置"。只有**符号本体**跟着变，
-  /// 名称文字仍用白字黑描边 —— 那是为了在任何底图上都读得出来。
+  /// 鐢ㄦ埛鍙ｅ緞锛?鍦板浘鏍囩鐨勯鑹插彲浠ヨ缃?銆傚彧鏈?*绗﹀彿鏈綋**璺熺潃鍙橈紝
+  /// 鍚嶇О鏂囧瓧浠嶇敤鐧藉瓧榛戞弿杈?鈥斺€?閭ｆ槸涓轰簡鍦ㄤ换浣曞簳鍥句笂閮借寰楀嚭鏉ャ€?
   final Color? overrideColor;
 
   const LabelSymbol({
@@ -30,16 +30,21 @@ class LabelSymbol extends StatelessWidget {
     this.overrideColor,
   });
 
-  static const double symbolSize = 28;
+  /// 鍦板浘涓婄鍙风殑鍩哄噯杈归暱锛堥€昏緫鍍忕礌锛夈€?
+  ///
+  /// v3.13 鐢?28 缂╁埌 **18**锛氱敤鎴峰弽棣?鍦板浘鏍囩澶ぇ"銆?
+  /// 娉ㄦ剰锛氳繖鍙奖鍝?*灞忓箷娓叉煋**锛涘鍑虹殑 DXF 鍥惧潡灏哄鐢?
+  /// `DxfExporter` 鐙珛鎺у埗锛?:1 鎻掑叆锛屼笌鐢ㄦ埛鎻掍欢涓€鑷达級锛屼袱鑰呬簰涓嶅奖鍝嶃€?
+  static const double symbolSize = 18;
 
   @override
   Widget build(BuildContext context) {
     final lt = label.type;
 
-    // 轨迹/无标签：不画符号，仅连线与距离
+    // 杞ㄨ抗/鏃犳爣绛撅細涓嶇敾绗﹀彿锛屼粎杩炵嚎涓庤窛绂?
     if (lt.id == 'none' || lt.id == 'track') return const SizedBox.shrink();
 
-    // 区域顶点：小圆点
+    // 鍖哄煙椤剁偣锛氬皬鍦嗙偣
     if (lt.id == 'area') {
       return CustomPaint(
         size: Size(8 * scale, 8 * scale),
@@ -48,7 +53,7 @@ class LabelSymbol extends StatelessWidget {
       );
     }
 
-    // 纯文字标注
+    // 绾枃瀛楁爣娉?
     if (lt.id == 'text') {
       final txt = label.name.trim().isNotEmpty ? label.name.trim() : label.note;
       if (txt.isEmpty) return const SizedBox.shrink();
@@ -59,7 +64,7 @@ class LabelSymbol extends StatelessWidget {
         ? label.name.trim()
         : (lt.symbol.isNotEmpty ? lt.symbol : lt.name);
 
-    // 图例库符号：用 DXF 真几何画（与出图一致），不再用形状近似。
+    // 鍥句緥搴撶鍙凤細鐢?DXF 鐪熷嚑浣曠敾锛堜笌鍑哄浘涓€鑷达級锛屼笉鍐嶇敤褰㈢姸杩戜技銆?
     if (lt.isBlock) {
       return SizedBox(
         width: symbolSize * scale,
@@ -85,7 +90,7 @@ class LabelSymbol extends StatelessWidget {
               padding: const EdgeInsets.all(2),
               child: DxfBlockThumb(
                 block: lt.block!,
-                // 用户可配颜色；未配置时用深灰（线稿观感）。
+                // 鐢ㄦ埛鍙厤棰滆壊锛涙湭閰嶇疆鏃剁敤娣辩伆锛堢嚎绋胯鎰燂級銆?
                 color: selected
                     ? const Color(0xFF0288D1)
                     : (overrideColor ?? const Color(0xFF263238)),
@@ -98,7 +103,7 @@ class LabelSymbol extends StatelessWidget {
                 left: -70,
                 right: -70,
                 child: Center(
-                  child: _OutlinedText(label.name.trim(), 9.5 * scale),
+                  child: _OutlinedText(label.name.trim(), 8.0 * scale),
                 ),
               ),
           ],
@@ -128,7 +133,7 @@ class LabelSymbol extends StatelessWidget {
               left: -70,
               right: -70,
               child: Center(
-                child: _OutlinedText(label.name.trim(), 9.5 * scale),
+                child: _OutlinedText(label.name.trim(), 8.0 * scale),
               ),
             ),
         ],
@@ -184,9 +189,9 @@ class _ShapePainter extends CustomPainter {
     if (selected) {
       canvas.drawCircle(c, w / 2 + 2, Paint()..color = const Color(0xFFFFD740));
     }
-    // 注：这里原本画了一个半透明黑色**阴影圆**，视觉上像给每个标签套了个
-    // 黑圈（用户反馈"标签不要连线/不要圈"）。阴影在深色卫星图上反而更糊，
-    // 现改为不画 —— 符号本体 + 白色描边已足够从底图上分辨。
+    // 娉細杩欓噷鍘熸湰鐢讳簡涓€涓崐閫忔槑榛戣壊**闃村奖鍦?*锛岃瑙変笂鍍忕粰姣忎釜鏍囩濂椾簡涓?
+    // 榛戝湀锛堢敤鎴峰弽棣?鏍囩涓嶈杩炵嚎/涓嶈鍦?锛夈€傞槾褰卞湪娣辫壊鍗槦鍥句笂鍙嶈€屾洿绯婏紝
+    // 鐜版敼涓轰笉鐢?鈥斺€?绗﹀彿鏈綋 + 鐧借壊鎻忚竟宸茶冻澶熶粠搴曞浘涓婂垎杈ㄣ€?
 
     final fill = Paint()..color = overrideColor ?? type.color;
     final stroke = Paint()
@@ -216,7 +221,7 @@ class _ShapePainter extends CustomPainter {
         canvas.drawPath(p, fill);
         canvas.drawPath(p, stroke);
         break;
-      default: // pin：圆形 + 尖角
+      default: // pin锛氬渾褰?+ 灏栬
         final tail = Path()
           ..moveTo(c.dx - w * 0.16, c.dy + w * 0.18)
           ..lineTo(c.dx, c.dy + w * 0.46)
@@ -227,7 +232,7 @@ class _ShapePainter extends CustomPainter {
         canvas.drawCircle(c, w / 2 - 3, stroke);
     }
 
-    // 符号字
+    // 绗﹀彿瀛?
     if (symbol.isNotEmpty) {
       final tp = TextPainter(
         text: TextSpan(
@@ -252,7 +257,7 @@ class _ShapePainter extends CustomPainter {
       old.overrideColor != overrideColor;
 }
 
-/// 白字黑边文本（地图标注）。
+/// 鐧藉瓧榛戣竟鏂囨湰锛堝湴鍥炬爣娉級銆?
 class _OutlinedText extends StatelessWidget {
   final String text;
   final double fontSize;
@@ -281,8 +286,8 @@ class _OutlinedText extends StatelessWidget {
   }
 }
 
-/// 用户位置箭头（奥维风格：小巧纸飞机形 + 白色描边 + 方向扇面）。
-/// 箭头始终跟随手机航向旋转；地图不跟随。
+/// 鐢ㄦ埛浣嶇疆绠ご锛堝ゥ缁撮鏍硷細灏忓阀绾搁鏈哄舰 + 鐧借壊鎻忚竟 + 鏂瑰悜鎵囬潰锛夈€?
+/// 绠ご濮嬬粓璺熼殢鎵嬫満鑸悜鏃嬭浆锛涘湴鍥句笉璺熼殢銆?
 class UserArrowPainter extends CustomPainter {
   final Color color;
   const UserArrowPainter({this.color = const Color(0xFF2196F3)});
@@ -292,7 +297,7 @@ class UserArrowPainter extends CustomPainter {
     final c = size.center(Offset.zero);
     final r = size.width / 2;
 
-    // 方向扇面（航向可信域，淡蓝半透明）
+    // 鏂瑰悜鎵囬潰锛堣埅鍚戝彲淇″煙锛屾贰钃濆崐閫忔槑锛?
     final fan = Path()
       ..moveTo(c.dx, c.dy)
       ..arcTo(Rect.fromCircle(center: c, radius: r * 1.9), _deg(-65),
@@ -300,7 +305,7 @@ class UserArrowPainter extends CustomPainter {
       ..close();
     canvas.drawPath(fan, Paint()..color = const Color(0x2A2196F3));
 
-    // 纸飞机箭头：尖端朝上，尾部内凹，圆滑描边
+    // 绾搁鏈虹澶达細灏栫鏈濅笂锛屽熬閮ㄥ唴鍑癸紝鍦嗘粦鎻忚竟
     final p = Path()
       ..moveTo(c.dx, c.dy - r * 0.98)
       ..lineTo(c.dx - r * 0.55, c.dy + r * 0.72)
@@ -315,7 +320,7 @@ class UserArrowPainter extends CustomPainter {
           ..strokeWidth = 2.2
           ..strokeJoin = StrokeJoin.round);
     canvas.drawPath(p, Paint()..color = color);
-    // 中心高光点
+    // 涓績楂樺厜鐐?
     canvas.drawCircle(Offset(c.dx, c.dy - r * 0.1), r * 0.14,
         Paint()..color = const Color(0xCCFFFFFF));
   }
@@ -326,7 +331,7 @@ class UserArrowPainter extends CustomPainter {
   bool shouldRepaint(UserArrowPainter old) => old.color != color;
 }
 
-/// 精度圈。
+/// 绮惧害鍦堛€?
 class AccuracyCirclePainter extends CustomPainter {
   const AccuracyCirclePainter();
 
@@ -349,19 +354,19 @@ class AccuracyCirclePainter extends CustomPainter {
 
 double deg2rad(double d) => d * math.pi / 180;
 
-/// 段距离文字（屏幕坐标 + 屏幕角度，由叠加层绘制，保证与线平行）
+/// 娈佃窛绂绘枃瀛楋紙灞忓箷鍧愭爣 + 灞忓箷瑙掑害锛岀敱鍙犲姞灞傜粯鍒讹紝淇濊瘉涓庣嚎骞宠锛?
 class SegText {
-  final Offset center; // 线段中点（屏幕坐标）
-  final double angleRad; // 线在屏幕上的方向角（已调整到 ±90° 内）
+  final Offset center; // 绾挎涓偣锛堝睆骞曞潗鏍囷級
+  final double angleRad; // 绾垮湪灞忓箷涓婄殑鏂瑰悜瑙掞紙宸茶皟鏁村埌 卤90掳 鍐咃級
   final String text;
   const SegText(this.center, this.angleRad, this.text);
 }
 
-/// 距离文字叠加层画笔：文字旋转角 = 线方向角，垂直于线上方偏移，
-/// 地图缩放/旋转/平移后随帧重算，永远与线平行。
+/// 璺濈鏂囧瓧鍙犲姞灞傜敾绗旓細鏂囧瓧鏃嬭浆瑙?= 绾挎柟鍚戣锛屽瀭鐩翠簬绾夸笂鏂瑰亸绉伙紝
+/// 鍦板浘缂╂斁/鏃嬭浆/骞崇Щ鍚庨殢甯ч噸绠楋紝姘歌繙涓庣嚎骞宠銆?
 class SegTextPainter extends CustomPainter {
   final List<SegText> items;
-  final double offset; // 垂直于线向上的偏移（像素）
+  final double offset; // 鍨傜洿浜庣嚎鍚戜笂鐨勫亸绉伙紙鍍忕礌锛?
   SegTextPainter(this.items, {this.offset = 8});
 
   @override
@@ -376,7 +381,7 @@ class SegTextPainter extends CustomPainter {
       canvas.save();
       canvas.translate(it.center.dx, it.center.dy);
       canvas.rotate(it.angleRad);
-      // 黑描边
+      // 榛戞弿杈?
       final stroke = TextPainter(
         text: TextSpan(
             text: it.text,

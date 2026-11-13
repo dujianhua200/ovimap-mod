@@ -156,6 +156,13 @@ double _halfWm(RoadGrade g) => _halfWmm(g);
 
 double _clampH(RoadGrade g) => math.min(_halfWm(g) * 2 * 0.6, 2.0);
 
+/// 米 → **图纸单位**。
+///
+/// v3.13 起导出坐标按出图比例缩放：`1 单位 = 比例/1000 米`
+/// （1:3000 → 1 单位 = 3 米）。测试里算"某个真实米数在图上的位置"
+/// 必须走这个换算，否则期望值会大 3 倍。
+double _mToUnits(double meters) => meters / (kScale / 1000.0);
+
 /// 水平路：恒纬度（投影后 y=0），自西向东 len 米。
 RoadPoly _hRoad(String name, RoadGrade g, double len, {double lat = 0}) =>
     RoadPoly(
@@ -260,14 +267,16 @@ void main() {
       final halfW = _halfWm(RoadGrade.trunk);
       final xs = texts.map((t) => _d(t.first('10'))).toList()..sort();
       for (var i = 0; i < 5; i++) {
-        final expectX = 100.0 + 200.0 * i;
-        expect((xs[i] - expectX).abs(), lessThanOrEqualTo(1.5),
+        // 米 → 图纸单位（1:3000 下 1 单位=3 米）
+        final expectX = _mToUnits(100.0 + 200.0 * i);
+        expect((xs[i] - expectX).abs(),
+            lessThanOrEqualTo(_mToUnits(1.5)),
             reason: '第 ${i + 1} 处 x=${xs[i]} 应≈$expectX（弧长均布 L*(2i-1)/2n）');
       }
       for (final t in texts) {
         final y = _d(t.first('20'));
         final h = _d(t.first('40'));
-        expect(y.abs(), lessThanOrEqualTo(halfW + 1e-6),
+        expect(y.abs(), lessThanOrEqualTo(halfW + _mToUnits(1e-6)),
             reason: '水平路 TEXT y 应落中心线（偏差≤halfW=$halfW）');
         expect(y.abs(), lessThanOrEqualTo(0.01), reason: '水平路 y 应严格=0');
         expect(h, closeTo(_clampH(RoadGrade.trunk), 1e-6),
@@ -293,18 +302,20 @@ void main() {
 
       // 中心线（投影后）：起点与 30° 方向
       final rad = 30 * math.pi / 180;
-      final sx = 0.01 * kScaleX;
-      final sy = -0.01 * kScaleY;
-      final len = 600.0;
+      // 起点偏移：测试用的 _diagRoad 以 (kLat+0.01, kLon-0.01) 为起点，
+      // 导出后坐标是**图纸单位**（1:3000 下 1 单位=3 米），故一并换算。
+      final sx = _mToUnits(0.01 * kScaleX);
+      final sy = _mToUnits(-0.01 * kScaleY);
+      final len = _mToUnits(600.0);
       for (final t in texts) {
         final px = _d(t.first('10'));
         final py = _d(t.first('20'));
         // 点到过 (sx,sy) 方向 (cos,sin) 直线的垂距
         final vx = px - sx, vy = py - sy;
         final perp = (vx * math.sin(rad) - vy * math.cos(rad)).abs();
-        expect(perp, lessThanOrEqualTo(_halfWm(RoadGrade.primary) + 1e-6),
+        expect(perp, lessThanOrEqualTo(_halfWm(RoadGrade.primary) + _mToUnits(1e-3)),
             reason: '斜路 TEXT 应落在双线之间（垂距≤halfW）');
-        expect(perp, lessThanOrEqualTo(0.05), reason: '垂距应≈0（在中心线上）');
+        expect(perp, lessThanOrEqualTo(_mToUnits(0.05)), reason: '垂距应≈0（在中心线上）');
         final along = vx * math.cos(rad) + vy * math.sin(rad);
         expect(along, greaterThan(0), reason: '沿线正向');
         expect(along, lessThan(len + 1), reason: '沿线范围内');
@@ -324,8 +335,9 @@ void main() {
           .toList()
         ..sort();
       for (var i = 0; i < 3; i++) {
-        expect(alongs[i], closeTo(100.0 + 200.0 * i, 1.5),
-            reason: '第 ${i + 1} 处沿线弧长应≈${100 + 200 * i}m');
+        expect(alongs[i],
+            closeTo(_mToUnits(100.0 + 200.0 * i), _mToUnits(1.5)),
+            reason: '第 ${i + 1} 处沿线弧长应≈${100 + 200 * i}m（图纸单位换算）');
       }
       dir.deleteSync(recursive: true);
     }, timeout: const Timeout(Duration(minutes: 2)));
@@ -343,15 +355,15 @@ void main() {
       expect(r300.length, inInclusiveRange(1, 2));
       final xs = r300.map((t) => _d(t.first('10'))).toList()..sort();
       if (r300.length == 2) {
-        expect(xs[0], closeTo(75, 1.5));
-        expect(xs[1], closeTo(225, 1.5));
+        expect(xs[0], closeTo(_mToUnits(75), _mToUnits(1.5)));
+        expect(xs[1], closeTo(_mToUnits(225), _mToUnits(1.5)));
       }
       final t150 = doc
           .on('TEXT', 'DaoLu')
           .where((t) => t.first('1') == 'TER150')
           .toList();
       expect(t150.length, 1, reason: '150m 路应恰 1 处');
-      expect(_d(t150.first.first('10')), closeTo(75, 1.5),
+      expect(_d(t150.first.first('10')), closeTo(_mToUnits(75), _mToUnits(1.5)),
           reason: '单处应含中点');
       dir.deleteSync(recursive: true);
     }, timeout: const Timeout(Duration(minutes: 2)));
