@@ -1012,8 +1012,8 @@ class DxfExporter {
     final ch = frame.contentHeight;
     if (cw <= 1e-6 || ch <= 1e-6) return false;
 
-    final spanX = (maxX - minX).abs();
-    final spanY = (maxY - minY).abs();
+    // 注：不再计算 spanX/spanY（含底图的包围盒跨度）。
+    // v3.16 起分幅**只看线路范围**，见下方 routeSpanX/Y。
 
     // ----------------------------------------------------------------
     // **分幅按"线路范围"算，不按"包围盒"算**

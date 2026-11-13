@@ -137,7 +137,8 @@ class BundledBasemap {
 
   final List<BundledRoad> _roads = [];
   final List<BundledPlace> _places = [];
-  final List<List<List<double>>> _buildingRings = [];
+  // 注：建筑**不在内存里存解析结果**（见 buildingsIn 的惰性解析说明），
+  // 早先的 `_buildingRings` 字段已移除 —— 那 70 万条环正是内存暴涨的根源。
 
   /// 各项数据的 bbox（用于快速判断"这一片有没有内置数据"）。
   double _rMinLat = 90, _rMaxLat = -90, _rMinLon = 180, _rMaxLon = -180;
