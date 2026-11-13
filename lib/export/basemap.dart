@@ -837,7 +837,10 @@ class BasemapFetcher {
             if (rings.isNotEmpty) {
               buildingsOut = [
                 ...buildingsOut,
-                for (final ring in rings) BuildingPoly([ring], '内置兜底')
+                // **建筑名留空**：兜底数据没有建筑名，写占位文字会在图上
+                // 出现满屏"内置兜底"（用户反馈"全是乱码"）。
+                // 空名 = 只画轮廓，不写文字。
+                for (final ring in rings) BuildingPoly([ring], '')
               ];
               bldReport = DatasetReport(
                 FetchState.ok,

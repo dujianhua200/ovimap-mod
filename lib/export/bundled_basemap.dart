@@ -26,6 +26,7 @@ library;
 
 import 'dart:convert';
 import 'dart:io' show Platform, gzip;
+import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/services.dart' show rootBundle;
 
@@ -141,11 +142,19 @@ class BundledBasemap {
   /// 各项数据的 bbox（用于快速判断"这一片有没有内置数据"）。
   double _rMinLat = 90, _rMaxLat = -90, _rMinLon = 180, _rMaxLon = -180;
   double _pMinLat = 90, _pMaxLat = -90, _pMinLon = 180, _pMaxLon = -180;
-  double _bMinLat = 90, _bMaxLat = -90, _bMinLon = 180, _bMaxLon = -180;
+
+  /// 建筑数据范围：用**构建时实测的常量**（不再解析 70 万条来求）。
+  ///
+  /// 实测值（assets/buildings/xinyang.geojson.gz）：
+  ///   lon 113.723 ~ 115.932   lat 31.393 ~ 32.664
+  /// 惰性解析后没有全量顶点可扫，所以这里写死。换数据包时同步改。
+  static const double _bMinLon = 113.723, _bMaxLon = 115.932;
+  static const double _bMinLat = 31.393, _bMaxLat = 32.664;
 
   bool get roadsLoaded => _roads.isNotEmpty;
   bool get placesLoaded => _places.isNotEmpty;
-  bool get buildingsLoaded => _buildingRings.isNotEmpty;
+  /// 建筑数据是否可用（只看字节在不在，不看解析结果）。
+  bool get buildingsLoaded => _buildingsGzBytes != null;
 
   /// 给定 bbox **是否与内置数据范围有交集**。
   ///
@@ -213,32 +222,26 @@ class BundledBasemap {
       loadErrors.add('地名：$e');
     }
 
+    // **建筑数据不在加载时解析**（v3.16 内存修复）。
+    //
+    // 背景：建筑有 70 万栋，全量解析进内存要 1.5~2 GB ——
+    // 用户实测任务管理器里 ovimap 占到 1967 MB，机器直接卡死。
+    //
+    // 改为：这里只**记住压缩字节**（21MB），第一次查询建筑时才解压解析，
+    // 且解析结果**只保留 bbox 内的**，用完即弃。
+    // 代价是首次查询慢一点（约 3~5 秒），换来常驻内存从 2GB 降到几十 MB。
     try {
-      final txt = await _readGz(kBundledBuildingsAsset);
-      for (final f in _features(txt)) {
-        final geom = f['geometry'];
-        if (geom is! Map) continue;
-        final type = geom['type'];
-        final coords = geom['coordinates'];
-        if (type == 'Polygon' && coords is List) {
-          for (final ring in coords) {
-            _addRing(ring);
-          }
-        } else if (type == 'MultiPolygon' && coords is List) {
-          for (final poly in coords) {
-            if (poly is! List) continue;
-            for (final ring in poly) {
-              _addRing(ring);
-            }
-          }
-        }
-      }
+      final raw = await rootBundle.load(kBundledBuildingsAsset);
+      _buildingsGzBytes = raw.buffer.asUint8List();
     } catch (e) {
       loadErrors.add('建筑：$e');
     }
     _loaded = true;
     _loadMs = sw.elapsedMilliseconds;
   }
+
+  /// 建筑数据的压缩字节（惰性解析用；不在内存里存解析结果）。
+  Uint8List? _buildingsGzBytes;
 
   /// 是否已经跑过 [_load]（无论成功失败）。
   bool _loaded = false;
@@ -253,20 +256,6 @@ class BundledBasemap {
     _rMaxLat = r.maxLat > _rMaxLat ? r.maxLat : _rMaxLat;
     _rMinLon = r.minLon < _rMinLon ? r.minLon : _rMinLon;
     _rMaxLon = r.maxLon > _rMaxLon ? r.maxLon : _rMaxLon;
-  }
-
-  void _addRing(dynamic ring) {
-    if (ring is! List) return;
-    final pts = _toLatLon(ring);
-    if (pts.length < 3) return;
-    _buildingRings.add(pts);
-    for (final p in pts) {
-      final lat = p[0], lon = p[1];
-      _bMinLat = lat < _bMinLat ? lat : _bMinLat;
-      _bMaxLat = lat > _bMaxLat ? lat : _bMaxLat;
-      _bMinLon = lon < _bMinLon ? lon : _bMinLon;
-      _bMaxLon = lon > _bMaxLon ? lon : _bMaxLon;
-    }
   }
 
   static Future<String> _readGz(String asset) async {
@@ -326,24 +315,68 @@ class BundledBasemap {
           .toList();
 
   /// 取 bbox 内的建筑轮廓环（`[lat, lon]` 列表）。
+  ///
+  /// ## 惰性解析（v3.16 内存修复）
+  /// 建筑 70 万栋，全量解析常驻要 ~2GB。这里改为：
+  ///   · 解压 + 解析只在**第一次查询**时发生；
+  ///   · 解析过程中**只保留落在 bbox 内的环**，其余立即丢弃；
+  ///   · 不缓存解析结果（下次查询重新过滤）。
+  /// 代价是每次导出多几秒，换来常驻内存从 GB 级降到几十 MB。
   List<List<List<double>>> buildingsIn(
       double lonMin, double latMin, double lonMax, double latMax) {
-    if (_buildingRings.isEmpty) return const [];
+    final gz = _buildingsGzBytes;
+    if (gz == null) return const [];
+
+    // 快速排除：与数据总范围无交集
+    if (lonMax < _bMinLon || lonMin > _bMaxLon) return const [];
+    if (latMax < _bMinLat || latMin > _bMaxLat) return const [];
+
     final out = <List<List<double>>>[];
-    for (final ring in _buildingRings) {
-      var hit = false;
-      for (final p in ring) {
-        if (p[0] >= latMin &&
-            p[0] <= latMax &&
-            p[1] >= lonMin &&
-            p[1] <= lonMax) {
-          hit = true;
-          break;
+    try {
+      final txt = utf8.decode(gzip.decode(gz));
+      for (final f in _features(txt)) {
+        final geom = f['geometry'];
+        if (geom is! Map) continue;
+        final coords = geom['coordinates'];
+        final type = geom['type'];
+        if (type == 'Polygon' && coords is List) {
+          for (final ring in coords) {
+            final ringPts = _toLatLon(ring);
+            if (_ringInBox(ringPts, lonMin, latMin, lonMax, latMax)) {
+              out.add(ringPts);
+            }
+          }
+        } else if (type == 'MultiPolygon' && coords is List) {
+          for (final poly in coords) {
+            if (poly is! List) continue;
+            for (final ring in poly) {
+              final ringPts = _toLatLon(ring);
+              if (_ringInBox(ringPts, lonMin, latMin, lonMax, latMax)) {
+                out.add(ringPts);
+              }
+            }
+          }
         }
       }
-      if (hit) out.add(ring);
+    } catch (e) {
+      loadErrors.add('建筑解析：$e');
     }
     return out;
+  }
+
+  /// 环是否有顶点落在框内。
+  static bool _ringInBox(List<List<double>> ring, double lonMin, double latMin,
+      double lonMax, double latMax) {
+    if (ring.length < 3) return false;
+    for (final p in ring) {
+      if (p[0] >= latMin &&
+          p[0] <= latMax &&
+          p[1] >= lonMin &&
+          p[1] <= lonMax) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /// 诊断用：各项数据条数与覆盖范围。
@@ -356,7 +389,8 @@ class BundledBasemap {
         : '\n加载异常：${loadErrors.join('；')}';
     return '道路 ${_roads.length} 条（${box(_rMinLat, _rMaxLat, _rMinLon, _rMaxLon)}）\n'
         '地名 ${_places.length} 个（${box(_pMinLat, _pMaxLat, _pMinLon, _pMaxLon)}）\n'
-        '建筑 ${_buildingRings.length} 栋（${box(_bMinLat, _bMaxLat, _bMinLon, _bMaxLon)}）\n'
+        '建筑 ${_buildingsGzBytes != null ? '已就绪（惰性，按范围过滤）' : '未加载'}'
+        '（${box(_bMinLat, _bMaxLat, _bMinLon, _bMaxLon)}）\n'
         '耗时 ${_loadMs}ms$errs';
   }
 }

@@ -143,20 +143,23 @@ class Toolbar extends StatelessWidget {
     );
   }
 
-  /// 符号按钮：显示当前符号的色块与符号字，点开符号库。
+  /// 符号按钮：显示当前符号的色块与符号字。
   ///
-  /// 把「当前符号」直接画在按钮上，是为了解决一个隐蔽问题 ——
-  /// 原来桌面端点完「打点」就开始落点，但用户看不到**正在放什么符号**，
-  /// 只能事后逐个改属性。现在一眼可见。
+  /// 单击 → 打开符号库（选类型）；
+  /// **长按 → 直接弹出颜色选择**（用户口径："打点的时候标签颜色可选，
+  /// 只有黑色，看着太单调"）。选完立刻反映到按钮色块与地图上已打的点。
   Widget _symbolBtn(BuildContext context) {
     final t = st.curType;
     final glyph = t.symbol.isNotEmpty
         ? t.symbol
         : (t.name.isNotEmpty ? t.name.substring(0, 1) : '·');
+    // 用户配的打点色优先（null = 跟随类型自带色）
+    final shown = st.labelColorOrNull ?? t.color;
     return Tooltip(
-      message: '符号库 · 当前「${t.name}」',
+      message: '符号库 · 当前「${t.name}」\n单击换符号，长按选颜色',
       child: InkWell(
         onTap: () => showSymbolLibrary(context, st),
+        onLongPress: () => _pickDotColor(context),
         child: SizedBox(
           width: 44,
           height: barHeight,
@@ -166,7 +169,7 @@ class Toolbar extends StatelessWidget {
               height: 20,
               alignment: Alignment.center,
               decoration: BoxDecoration(
-                color: t.color.withValues(alpha: 0.85),
+                color: shown.withValues(alpha: 0.85),
                 borderRadius: BorderRadius.circular(
                     t.shape == 'box' ? 3 : 999),
               ),
@@ -178,6 +181,57 @@ class Toolbar extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  /// 打点颜色选择（工具栏长按弹出）。
+  ///
+  /// 与「设置 → 地图标签颜色」共用同一个 `AppState.labelColor`，
+  /// 所以选完之后地图上已打的点、后打的点、导出预览都是同一个颜色。
+  Future<void> _pickDotColor(BuildContext context) async {
+    const presets = <String, int>{
+      '跟随类型': 0,
+      '纯黑': 0xFF000000,
+      '大红': 0xFFD32F2F,
+      '橙色': 0xFFEF6C00,
+      '金黄': 0xFFF9A825,
+      '草绿': 0xFF2E7D32,
+      '青色': 0xFF00838F,
+      '宝蓝': 0xFF1565C0,
+      '紫色': 0xFF6A1B9A,
+      '玫红': 0xFFAD1457,
+      '纯白': 0xFFFFFFFF,
+    };
+    final picked = await showMenu<int>(
+      context: context,
+      position: const RelativeRect.fromLTRB(120, 90, 0, 0),
+      items: [
+        for (final e in presets.entries)
+          PopupMenuItem<int>(
+            value: e.value,
+            height: 38,
+            child: Row(children: [
+              Container(
+                width: 14,
+                height: 14,
+                decoration: BoxDecoration(
+                  color: e.value == 0
+                      ? const Color(0xFF8A8A8A)
+                      : Color(e.value),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: const Color(0x44000000)),
+                ),
+              ),
+              const SizedBox(width: 9),
+              Text(e.key, style: const TextStyle(fontSize: 13)),
+              if (e.value == st.labelColor) ...[
+                const Spacer(),
+                const Icon(Icons.check, size: 15, color: kAccent),
+              ],
+            ]),
+          ),
+      ],
+    );
+    if (picked != null) st.setLabelColor(picked);
   }
 
   /// 设计 / 竣工模式切换（对齐移动端模式行，竣工用橙色警示）。

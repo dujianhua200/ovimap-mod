@@ -270,6 +270,11 @@ class DxfExporter {
       if (y > extMaxY) extMaxY = y;
     }
 
+    // **线路自身的范围**（图纸单位）：分幅只按它算，不含底图。
+    // extMinX 等后续会被底图扩展，所以必须在这里另存一份。
+    final routeMinX = extMinX, routeMinY = extMinY;
+    final routeMaxX = extMaxX, routeMaxY = extMaxY;
+
     // 沿线总长度（图签用）
     var routeTotalLen = 0.0;
     // 桩号跨线组连续累计：续画链/分支链不再从 K0+000 重新归零，
@@ -593,8 +598,13 @@ class DxfExporter {
 
     // 图框：优先用**用户提供的图框**（assets/frames/frame_a3.dxf，尺寸不变）；
     // 装不下就分多张（每张一套完整图框）。没有图框资源时退回旧的矩形框。
-    final frameUsed = _appendUserFrameOrFallback(
-        c, frame, extMinX, extMinY, extMaxX, extMaxY);
+    //
+    // 传两套范围：
+    //   · ext* = 含底图的总包围盒（决定图框最终摆哪、要不要居中）
+    //   · route* = 只有杆路的范围（决定**分几幅**）
+    final frameUsed = _appendUserFrameOrFallback(c, frame,
+        extMinX, extMinY, extMaxX, extMaxY, routeMinX, routeMinY,
+        routeMaxX, routeMaxY);
     if (!frameUsed) {
       _appendFrame(c, extMinX, extMinY, extMaxX, extMaxY);
     }
@@ -994,7 +1004,8 @@ class DxfExporter {
   /// 用户明确"大小不要变"。缩放会让图框的线宽、字号、图签比例全部失真，
   /// 打印出来就不合规了。宁可多出几张。
   static bool _appendUserFrameOrFallback(_Ctx c, FrameTemplate? frame,
-      double minX, double minY, double maxX, double maxY) {
+      double minX, double minY, double maxX, double maxY,
+      double routeMinX, double routeMinY, double routeMaxX, double routeMaxY) {
     if (frame == null || frame.shapes.isEmpty) return false;
 
     final cw = frame.contentWidth;
@@ -1004,31 +1015,52 @@ class DxfExporter {
     final spanX = (maxX - minX).abs();
     final spanY = (maxY - minY).abs();
 
-    // 需要几列几行
-    final cols = math.max(1, (spanX / cw).ceil());
-    final rows = math.max(1, (spanY / ch).ceil());
-
-    // 单张且内容明显小于可用区域时，**把内容摆到图框正中**。
+    // ----------------------------------------------------------------
+    // **分幅按"线路范围"算，不按"包围盒"算**
     //
-    // 用户口径："把导出的放到图框里面"。如果图框从内容左下角开始画，
-    // 小范围线路会全挤在左下角、右上半张空白，很不像正式图纸。
-    // 居中后视觉上就是"内容装在图框里"。
-    final originX = minX - frame.contentInset;
-    final originY = minY - frame.contentInset;
+    // 用户反馈："本来给图框能解决的，弄了十几个"。
+    // 根因：传入的 minX..maxY 是**含底图**的总包围盒 —— 兜底底图那 394 栋
+    // 建筑铺开几百米，导致 spanX/spanY 比线路大得多，于是算出一堆图框。
+    //
+    // 正确口径：图框该随**杆路线路**走。线路放得下就一张（用户预期），
+    // 放不下才按线路长度分幅。底图超出的部分照常画出图框外没关系 ——
+    // 现场看的是杆路。
+    // ----------------------------------------------------------------
+    final routeSpanX = (routeMaxX - routeMinX).abs();
+    final routeSpanY = (routeMaxY - routeMinY).abs();
+    // **不要回退到含底图的 spanX**（v3.16 修正）。
+    //
+    // 原写法 `routeSpanX > 1e-6 ? routeSpanX : spanX` 有个陷阱：
+    // 纯南北向的线路 X 跨度为 0，于是回退去用底图包围盒（可能上万单位）
+    // → 算出几十套图框（用户："弄了十几个"）。
+    //
+    // 正确语义：线路在某个方向没有延伸，就是**只要 1 列/1 行**。
+    final useSpanX = routeSpanX;
+    final useSpanY = routeSpanY;
+
+    // 需要几列几行（按线路范围）
+    final cols = math.max(1, (useSpanX / cw).ceil());
+    final rows = math.max(1, (useSpanY / ch).ceil());
+
+
+    // 单张时按线路居中；多张时按线路左下角平铺（见下）。
 
     if (cols == 1 && rows == 1) {
-      // 单张：图框中心对准内容中心（视觉上"内容装在图框里"）。
-      final cxContent = (minX + maxX) / 2;
-      final cyContent = (minY + maxY) / 2;
-      final dx = cxContent - frame.width / 2;
-      final dy = cyContent - frame.height / 2;
+      // 单张：图框**按杆路居中**（不是按含底图的总包围盒）。
+      // 底图通常比线路大得多，按总包围盒居中会让线路偏到一边。
+      final cxRoute = (routeMinX + routeMaxX) / 2;
+      final cyRoute = (routeMinY + routeMaxY) / 2;
+      final dx = cxRoute - frame.width / 2;
+      final dy = cyRoute - frame.height / 2;
       _emitFrameShapes(c, frame, dx, dy);
     } else {
-      // 多张：按网格平铺，首张对齐内容左下（保证不漏内容）。
+      // 多张：以**线路**左下角为起点按网格平铺，保证每一段杆路都落在某张图框里。
+      final oX = routeMinX - frame.contentInset;
+      final oY = routeMinY - frame.contentInset;
       for (var r = 0; r < rows; r++) {
         for (var k = 0; k < cols; k++) {
-          final dx = originX + k * cw;
-          final dy = originY + r * ch;
+          final dx = oX + k * cw;
+          final dy = oY + r * ch;
           _emitFrameShapes(c, frame, dx, dy);
         }
       }

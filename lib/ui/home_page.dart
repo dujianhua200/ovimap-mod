@@ -703,14 +703,19 @@ class _HomePageState extends State<HomePage> {
                 for (final t in LabelType.all)
                   GestureDetector(
                     onTap: () => st.setType(t),
+                    // 长按选**打点颜色**（用户口径："打点的时候标签颜色可选，
+                    // 只有黑色太单调"）。与桌面端工具栏长按是同一个入口。
+                    onLongPress: () => showDotColorDialog(context, st),
                     child: Container(
                       width: 62,
                       margin: const EdgeInsets.symmetric(horizontal: 2),
                       alignment: Alignment.center,
                       padding: const EdgeInsets.symmetric(horizontal: 3),
                       decoration: BoxDecoration(
+                        // 选中态优先显示用户配的打点色
                         color: st.curType.id == t.id
-                            ? t.color.withValues(alpha: 0.85)
+                            ? (st.labelColorOrNull ?? t.color)
+                                .withValues(alpha: 0.85)
                             : TokC.field,
                         borderRadius: BorderRadius.circular(8),
                         border: Border.all(

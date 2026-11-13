@@ -2178,6 +2178,103 @@ Future<void> showOverpassEndpointsDialog(BuildContext context, AppState st) asyn
 
 // ================= 地图标签外观 =================
 
+/// 「打点颜色」：采集中长按符号条弹出的快捷色板。
+///
+/// 与「设置 → 地图标签颜色」写的是**同一个** `AppState.labelColor`，
+/// 只是入口更顺手：正在打点时不用退出采集流程去翻设置。
+///
+/// 用户口径："打点的时候标签颜色可选，只有黑色，看着太单调"。
+Future<void> showDotColorDialog(BuildContext context, AppState st) {
+  const presets = <String, int>{
+    '跟随符号类型': 0,
+    '纯黑': 0xFF000000,
+    '大红': 0xFFD32F2F,
+    '橙色': 0xFFEF6C00,
+    '金黄': 0xFFF9A825,
+    '草绿': 0xFF2E7D32,
+    '青色': 0xFF00838F,
+    '宝蓝': 0xFF1565C0,
+    '紫色': 0xFF6A1B9A,
+    '玫红': 0xFFAD1457,
+    '纯白': 0xFFFFFFFF,
+  };
+  return showDarkDialog(
+    context,
+    title: '打点颜色',
+    content: SizedBox(
+      width: 340,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '选完立刻生效：地图上已打的点、之后打的点都变成这个颜色。',
+            style: TextStyle(color: kTextSub, fontSize: 12, height: 1.5),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final e in presets.entries)
+                InkWell(
+                  onTap: () {
+                    st.setLabelColor(e.value);
+                    Navigator.pop(context);
+                    toast(context, e.value == 0
+                        ? '已恢复「跟随符号类型」'
+                        : '打点颜色已改为「${e.key}」');
+                  },
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    width: 104,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: TokC.field,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: st.labelColor == e.value
+                            ? kAccent
+                            : TokC.divider,
+                        width: st.labelColor == e.value ? 1.6 : 0.6,
+                      ),
+                    ),
+                    child: Row(children: [
+                      Container(
+                        width: 14,
+                        height: 14,
+                        decoration: BoxDecoration(
+                          color: e.value == 0
+                              ? const Color(0xFFB0BEC5)
+                              : Color(e.value),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                              color: const Color(0x33000000), width: 0.8),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(e.key,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                color: kTextMain, fontSize: 11.5)),
+                      ),
+                    ]),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      darkTextBtn('关闭', () => Navigator.pop(context), color: kTextSub),
+    ],
+  );
+}
+
 /// 「地图标签颜色」：选一个颜色，地图上所有符号本体立刻跟着变。
 ///
 /// 用户口径："标签的颜色实现可选，现在只有黑色，我希望有好几种颜色可选"。
