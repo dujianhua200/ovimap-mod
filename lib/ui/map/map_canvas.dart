@@ -656,15 +656,37 @@ List<Polyline> buildSegLines(AppState st, List<MapLabel> pts,
         }
       }
 
-      // 把 [from] 端沿线段方向缩进 [px] 像素（最多 45%，避免短线段反向）。
+      // 把线段两端沿自身方向缩进，使线**正好止于图标边缘**。
+      //
+      // 算法（比"按比例缩"精确）：
+      //   ① 把线段方向换算成**像素向量**（经纬度 → 像素，经纬各自除以每像素度数）；
+      //   ② 单位化后乘以图标半径 → 得到像素偏移；
+      //   ③ 再换回经纬度，从端点往内退。
+      // 这样无论线段是斜的、还是经度/纬度方向，缩进量都等于图标半径。
       List<double> inset(double fromLat, double fromLon, double toLat,
           double toLon, double px) {
+        // 端点已在目标端？防止零长
         final dLat = toLat - fromLat, dLon = toLon - fromLon;
-        final span = math.max(dLat.abs(), dLon.abs());
-        if (span < 1e-12) return [fromLat, fromLon];
-        final t = math.min(0.45,
-            math.max(px * dLatPerPx / span, px * dLonPerPx / span));
-        return [fromLat + dLat * t, fromLon + dLon * t];
+        if (dLat.abs() < 1e-12 && dLon.abs() < 1e-12) {
+          return [fromLat, fromLon];
+        }
+        // ① 像素向量
+        final pxX = dLonPerPx > 0 ? dLon / dLonPerPx : 0.0;
+        final pxY = dLatPerPx > 0 ? dLat / dLatPerPx : 0.0;
+        final lenPx = math.sqrt(pxX * pxX + pxY * pxY);
+        if (lenPx < 1e-9) {
+          // 分辨率未知（zoom 无效）：退回按比例缩一点点
+          return [fromLat + dLat * 0.08, fromLon + dLon * 0.08];
+        }
+        // ② 单位向量 × 半径 = 像素退让量；不超过线段一半（防反向）
+        final stepPx = math.min(px, lenPx * 0.45);
+        final ux = pxX / lenPx * stepPx;
+        final uy = pxY / lenPx * stepPx;
+        // ③ 换回经纬度
+        return [
+          fromLat + uy * dLatPerPx,
+          fromLon + ux * dLonPerPx,
+        ];
       }
 
       final sa = inset(pa[0], pa[1], pb[0], pb[1], radiusPx);

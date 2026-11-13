@@ -14,10 +14,11 @@
 ///    图框平移、旋转对齐到内容坐标系（块内 bbox 归一化到原点）。
 library;
 
-import 'dart:convert' show latin1, LineSplitter;
+import 'dart:convert' show latin1, LineSplitter, Utf8Decoder, Utf8Encoder;
 import 'dart:math' as math;
 
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:gbk_codec/gbk_codec.dart' show gbk_bytes;
 
 /// 图框图元（统一成简单几何，便于写进 R12/R2000）。
 sealed class FrameShape {
@@ -116,7 +117,10 @@ class FrameLibrary {
     if (c != null) return c;
     try {
       final raw = await rootBundle.load(assetPath);
-      final text = latin1.decode(raw.buffer.asUint8List());
+      final bytes = raw.buffer.asUint8List();
+      // AS-IS 文本：图框 DXF 的 `$DWGCODEPAGE = ANSI_936`（中文 GBK）。
+      // 解析只用 ASCII 组码/数值，中文按 GBK 还原（见 _decodeDxfText）。
+      final text = latin1.decode(bytes);
       final t = parseDxfFrame(text);
       _cached = t;
       return t;
@@ -129,7 +133,93 @@ class FrameLibrary {
   static void resetForTest() => _cached = null;
 }
 
-/// 从 DXF 文本解析图框（只取 BLOCKS 里的图元，展开一层嵌套 INSERT）。
+/// 清理 MTEXT 的富文本控制码，只留可读文字。
+///
+/// ## 为什么必须清
+/// 用户图框的 MTEXT 原文长这样（`$DWGCODEPAGE = ANSI_936`）：
+///
+///     {\fSimSun|b0|i0|c134|p2;\H1.2x;专业负责人}
+///
+/// 我们把它当**纯文字**写进导出的 `TEXT` 实体，CAD 打开时看到
+/// `\fSimSun|b0|...` 这种非法转义 → **"无效或不完整的 DXF 输入，图形被放弃"**。
+/// 这正是用户导出后打不开的直接原因。
+///
+/// ## 清理规则
+/// · 去掉 `\f<字体>|b|i|c|p;`、`\H<倍数>x;`、`\W<倍数>x;` 等格式指令；
+/// · 去掉成对的 `{ }` 分组符；
+/// · `\P` 换行 → 空格（TEXT 不支持多行）；
+/// · `%%d/%%c/%%p` 等 AutoCAD 控制码保留（它们是合法的）；
+/// · 中文按 **GBK** 还原（文件声明 ANSI_936，直接 latin1 解出来是乱码）。
+String _cleanMText(String raw) {
+  var s = _decodeDxfText(raw);
+
+  // 反复剥离，处理嵌套
+  for (var guard = 0; guard < 8; guard++) {
+    final before = s;
+    // \fSimSun|b0|i0|c134|p2;   /  \H1.2x;  /  \W0.8x;  /  \C1;  /  \T1.1;
+    s = s.replaceAll(
+        RegExp(r'\\[fFWHCTQAhwq][^;\\{}]*;'), '');
+    // \P（换行）、\~（不换行空格）
+    s = s.replaceAll(RegExp(r'\\P'), ' ');
+    s = s.replaceAll(RegExp(r'\\~'), ' ');
+    // 其它反斜杠转义（\L \O \K \o 等单字符开关）
+    s = s.replaceAll(RegExp(r'\\[LOKlo]'), '');
+    // 成组花括号
+    s = s.replaceAll('{', '').replaceAll('}', '');
+    if (s == before) break;
+  }
+
+  // 收尾：只去首尾空白。**不合并内部空格** —— 图框里「审  核」「图  例」
+  // 这种排版空格是设计的一部分，压掉会变成「审 核」。
+  s = s.replaceAll(RegExp(r'^\s+|\s+$'), '');
+  return s;
+}
+
+/// DXF 文本还原中文。
+///
+/// ## 坑：`$DWGCODEPAGE` 会撒谎
+/// 用户图框头部写的是 `ANSI_936`（GBK），但实际字节是 **UTF-8**：
+/// `\xe5\xae\xa1` = UTF-8 的「审」，按 GBK 解就报错/乱码。
+/// （很多国内 CAD 插件导出 DXF 时都这样：抄了 R12 的头部模板，
+///  内容却按现代 UTF-8 写。）
+///
+/// ## 策略：先 UTF-8，失败再 GBK
+/// 解析器全程用 `latin1` 读（保证组码/数值不错位），
+/// 所以这里要把 char 还原成字节再按正确编码解码。
+/// 顺序很重要：UTF-8 校验很严（非法序列必抛），能当探测器用；
+/// 解不出来时再退回 GBK（老图纸常见）。
+String _decodeDxfText(String s) {
+  var hasHigh = false;
+  for (final c in s.codeUnits) {
+    if (c > 0x7F) {
+      hasHigh = true;
+      break;
+    }
+  }
+  if (!hasHigh) return s;
+
+  final bytes = <int>[];
+  for (final c in s.codeUnits) {
+    if (c <= 0xFF) {
+      bytes.add(c);
+    } else {
+      bytes.addAll(Utf8Encoder().convert(String.fromCharCode(c)));
+    }
+  }
+
+  // ① UTF-8（严格：非法序列会抛）
+  try {
+    return const Utf8Decoder().convert(bytes);
+  } catch (_) {}
+  // ② GBK / GB18030（老 R12 图纸）
+  try {
+    return gbk_bytes.decode(bytes);
+  } catch (_) {}
+  // ③ 都失败：原样返回（绝不因编码问题丢掉整份图框）
+  return s;
+}
+
+
 FrameTemplate parseDxfFrame(String text) {
   final lines = const LineSplitter().convert(text.replaceAll('\r', ''));
   // 组成 (code, value) 对
@@ -325,10 +415,10 @@ FrameShape? _shapeFromEntity(
       return FrameCircle(d('10'), d('20'), d('40'), layer);
     case 'TEXT':
       return FrameText(d('10'), d('20'), d('40', 2.5), d('50'),
-          e['1'] ?? '', layer);
+          _cleanMText(e['1'] ?? ''), layer);
     case 'MTEXT':
       return FrameText(d('10'), d('20'), d('40', 2.5), d('50'),
-          e['1'] ?? '', layer);
+          _cleanMText(e['1'] ?? ''), layer);
     default:
       return null;
   }

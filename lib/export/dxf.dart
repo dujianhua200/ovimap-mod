@@ -668,7 +668,13 @@ class DxfExporter {
       bool style = false,
       String? styleName,
       bool centered = false}) {
-    final t = text.replaceAll('\r', ' ').replaceAll('\n', ' ');
+    // **DXF 文字净化（关键防线）**
+    //
+    // 组码 1 是单行文本值：里面出现裸的 `\`、`{`、`}` 会让 CAD 解析失败，
+    // 打开时报「无效或不完整的 DXF 输入，图形被放弃」。
+    // 图框里的 MTEXT 富文本码正是这么带进来的 —— 在 frame_template 已清理，
+    // 这里再加一道：任何来源的文字都保证只含安全字符。
+    final t = _sanitizeDxfText(text);
     final sn = styleName ?? (style ? 'SimSun' : null);
     c.ent('TEXT', layer, 'AcDbText');
     if (sn != null) c.sb.write('7\n$sn\n');
@@ -1052,6 +1058,27 @@ class DxfExporter {
               txt, angle: t.rot);
       }
     }
+  }
+
+  /// 把任意文字净化成可安全写进 DXF `组码 1` 的形式。
+  ///
+  /// AutoCAD 对 TEXT 的值相当敏感：裸 `\`、不配对的 `{}`、
+  /// 未定义的 `\X` 转义都会导致"无效或不完整的 DXF 输入"。
+  /// 图框的 MTEXT 富文本码（`\fSimSun|b0|i0|c134|p2;`）就属于后者。
+  ///
+  /// 保留：普通字符、中文、AutoCAD 合法控制码 `%%d/%%c/%%p/%%%`。
+  static String _sanitizeDxfText(String s) {
+    var t = s.replaceAll('\r', ' ').replaceAll('\n', ' ');
+
+    // 1) 去掉未定义的 \X 转义（保留 AutoCAD 合法的 \\ 与 \U+XXXX）
+    t = t.replaceAllMapped(RegExp(r'\\([^\\U])'), (m) => '');
+    // 2) 去掉花括号分组符
+    t = t.replaceAll('{', '').replaceAll('}', '');
+    // 3) 去掉控制字符（0x00-0x1F），换行已在上一步换成空格
+    t = t.replaceAll(RegExp(r'[\x00-\x1F]'), ' ');
+    // 4) 收尾空白（**不合并内部空格**：图纸里"图  例"这种排版空格有含义）
+    t = t.replaceAll(RegExp(r'^\s+|\s+$'), '');
+    return t;
   }
 
   /// 圆（图框里的圆、印章位等）。

@@ -2180,26 +2180,26 @@ Future<void> showOverpassEndpointsDialog(BuildContext context, AppState st) asyn
 
 /// 「地图标签颜色」：选一个颜色，地图上所有符号本体立刻跟着变。
 ///
-/// 用户口径："地图标签的颜色可以设置"。只影响**地图渲染**——
-/// 出图（DXF）有独立的图层色规范，不受这里影响。
+/// 用户口径："标签的颜色实现可选，现在只有黑色，我希望有好几种颜色可选"。
+/// 只影响**地图渲染** —— 出图（DXF）的颜色在导出对话框中单独设置。
 ///
 /// 「跟随类型」= 清除自定义色，恢复每个符号类型自带的颜色
-/// （杆紫、井青、箱绿……），这在需要一眼分辨类型时更好用。
+/// （杆紫、井青、箱绿……），在需要一眼分辨类型时更好用。
 Future<void> showLabelColorDialog(BuildContext context, AppState st) {
-  // 常用色板：足够覆盖"在卫星图/街道图上都要看得清"的场景。
+  // 常用色板：浅色/深色底图都要看得清，所以饱和度都压得较高。
   const presets = <String, int>{
-    '类型默认': 0,
-    '深灰（线稿感）': 0xFF37474F,
-    '黑': 0xFF000000,
-    '红': 0xFFD32F2F,
-    '橙': 0xFFEF6C00,
-    '黄': 0xFFF9A825,
-    '绿': 0xFF2E7D32,
-    '青': 0xFF00838F,
-    '蓝': 0xFF1565C0,
-    '紫': 0xFF6A1B9A,
-    '粉': 0xFFAD1457,
-    '白': 0xFFFFFFFF,
+    '跟随类型（默认）': 0,
+    '深灰·线稿': 0xFF37474F,
+    '纯黑': 0xFF000000,
+    '大红': 0xFFD32F2F,
+    '橙色': 0xFFEF6C00,
+    '金黄': 0xFFF9A825,
+    '草绿': 0xFF2E7D32,
+    '青色': 0xFF00838F,
+    '宝蓝': 0xFF1565C0,
+    '紫色': 0xFF6A1B9A,
+    '玫红': 0xFFAD1457,
+    '纯白': 0xFFFFFFFF,
   };
 
   return showDarkDialog(

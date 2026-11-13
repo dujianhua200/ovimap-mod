@@ -135,10 +135,10 @@ const List<OviMenuGroupDef> oviMenuGroups = <OviMenuGroupDef>[
         activator: SingleActivator(LogicalKeyboardKey.digit0, meta: true)),
   ]),
   OviMenuGroupDef('底图', <OviMenuItemDef>[
+    OviMenuItemDef('label_color', '🎨 地图标签颜色（符号/线条配色）'),
     OviMenuItemDef('source', '图源 / 图层'),
     OviMenuItemDef('coord_fmt', '坐标格式（切换）'),
     OviMenuItemDef('offline', '离线地图（预下载）'),
-    OviMenuItemDef('label_color', '地图标签颜色'),
     OviMenuItemDef('tianditu_key', '天地图 Key 设置', dividerBefore: true),
     OviMenuItemDef('amap_key', '高德 Key 设置'),
     OviMenuItemDef('overpass', 'Overpass 端点', dividerBefore: true),

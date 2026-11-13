@@ -29,6 +29,9 @@ Future<void> showSettingsMenu(
         shrinkWrap: true,
         children: [
           sheetGroupTitle('地图'),
+          // 放在最前面：用户反馈"没发现标签能改颜色"，说明藏太深了。
+          sheetTile(context, '🎨 地图标签颜色（符号/线条配色）',
+              () => showLabelColorDialog(context, st)),
           sheetTile(context, '坐标格式：${GeoUtil.fmtName(st.coordFmt)}',
               () => st.setCoordFmt(st.coordFmt + 1)),
           sheetTile(context, '图源 / 图层', () => showSourceDialog(context, st)),
@@ -39,7 +42,6 @@ Future<void> showSettingsMenu(
           sheetTile(context, 'Overpass 端点（底图数据源）',
               () => showOverpassEndpointsDialog(context, st)),
           sheetTile(context, '离线地图（出行前预下载）', onOffline),
-          sheetTile(context, '地图标签颜色', () => showLabelColorDialog(context, st)),
           sheetGroupTitle('云同步'),
           sheetTile(
               context,
