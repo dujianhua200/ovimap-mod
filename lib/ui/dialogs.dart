@@ -15,6 +15,7 @@ import '../export/csv.dart';
 import '../geo/geo_convert.dart';
 import '../export/dxf.dart';
 import '../export/dxf_version.dart';
+import '../export/frame_template.dart';
 import '../export/kml.dart';
 import '../export/local_basemap.dart';
 import '../export/overpass.dart';
@@ -59,6 +60,79 @@ const Color kWarn = TokC.warn;
 
 /// 提示 / 占位文字色。
 const Color kTextHint = TokC.textHint;
+
+/// 「出图颜色」色块：点一下弹出颜色选择，选完回调 0xRRGGBB（0=默认色）。
+///
+/// 用户口径："导出的标签颜色实现可选，现在只有黑色，我希望有好几种颜色可选"。
+/// 提供 12 个常用色 + 「默认」，足够覆盖现场打印/出图的区分需求。
+Widget _colorChip(String label, int current, ValueChanged<int> onPick) {
+  const presets = <String, int>{
+    '默认': 0,
+    '黑': 0x000000,
+    '白': 0xFFFFFF,
+    '红': 0xFF0000,
+    '橙': 0xFF7F00,
+    '黄': 0xFFFF00,
+    '绿': 0x00C000,
+    '青': 0x00FFFF,
+    '蓝': 0x0000FF,
+    '紫': 0x8000FF,
+    '品红': 0xFF00FF,
+    '灰': 0x808080,
+  };
+  final shown = current == 0 ? const Color(0xFF7A7A7A) : Color(current);
+  return Padding(
+    padding: const EdgeInsets.only(right: 6),
+    child: PopupMenuButton<int>(
+      tooltip: '$label颜色',
+      onSelected: onPick,
+      itemBuilder: (ctx) => [
+        for (final e in presets.entries)
+          PopupMenuItem<int>(
+            value: e.value,
+            height: 36,
+            child: Row(children: [
+              Container(
+                width: 14,
+                height: 14,
+                decoration: BoxDecoration(
+                  color: e.value == 0
+                      ? const Color(0xFF7A7A7A)
+                      : Color(e.value),
+                  border: Border.all(color: const Color(0x44000000)),
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(e.key, style: const TextStyle(fontSize: 13)),
+              if (e.value == current) ...[
+                const Spacer(),
+                const Icon(Icons.check, size: 15, color: kAccent),
+              ],
+            ]),
+          ),
+      ],
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: kFieldBg,
+          borderRadius: BorderRadius.circular(TokR.s),
+          border: Border.all(color: TokC.divider, width: 0.6),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 11,
+            height: 11,
+            decoration: BoxDecoration(color: shown, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 5),
+          Text(label,
+              style: const TextStyle(color: kTextMain, fontSize: 12)),
+        ]),
+      ),
+    ),
+  );
+}
 
 InputDecoration dec(String hint) => InputDecoration(
       hintText: hint,
@@ -986,6 +1060,15 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
   // 是否在符号上方写名称：默认关（用户口径"块中间没有原字"）。
   var showNames = opt('dxfShowNames', false);
 
+  // —— 图框（用户 DXF，原样搬用，尺寸不变）——
+  var useFrame = opt('dxfUseFrame', true);
+
+  // —— 出图颜色（用户口径："标签的颜色实现可选，现在只有黑色"）——
+  // 值为 0xRRGGBB，0 = 用图层默认色。三个常用项：符号/距离/杆路。
+  var labelColor = prefs.getInt('dxfLabelColor') ?? 0;
+  var distColor = prefs.getInt('dxfDistColor') ?? 0;
+  var rodColor = prefs.getInt('dxfRodColor') ?? 0;
+
   // —— 搜索/兜底 key（导出与"底图检测"共用同一份，口径一致）——
   // 天地图 key：用户自定义优先，未配置则用内置兜底（单一来源）
   final userKey = prefs.getString(AppState.prefTdtKey)?.trim() ?? '';
@@ -1201,6 +1284,27 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
             value: showNames,
             activeColor: kAccent,
             onChanged: (v) => setSt(() => showNames = v ?? false),
+          ),
+          CheckboxListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: const Text('使用我的图框（新块.dxf，尺寸不变，装不下自动分幅）',
+                style: TextStyle(color: kTextMain, fontSize: 13)),
+            value: useFrame,
+            activeColor: kAccent,
+            onChanged: (v) => setSt(() => useFrame = v ?? true),
+          ),
+          // —— 出图颜色（用户口径：不要只有黑色，要好几种可选）——
+          Padding(
+            padding: const EdgeInsets.only(top: 6, bottom: 2),
+            child: Row(children: [
+              const Text('出图颜色：',
+                  style: TextStyle(color: kTextMain, fontSize: 13)),
+              const SizedBox(width: 4),
+              _colorChip('符号', labelColor, (v) => setSt(() => labelColor = v)),
+              _colorChip('距离', distColor, (v) => setSt(() => distColor = v)),
+              _colorChip('杆路', rodColor, (v) => setSt(() => rodColor = v)),
+            ]),
           ),
           CheckboxListTile(
             dense: true,
@@ -1456,6 +1560,11 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
         prefs.setInt('dxfFixedScale', fixedScale);
         prefs.setDouble('dxfRodWidthMm', rodWidthMm);
         prefs.setBool('dxfShowNames', showNames);
+        // 图框与颜色
+        prefs.setBool('dxfUseFrame', useFrame);
+        prefs.setInt('dxfLabelColor', labelColor);
+        prefs.setInt('dxfDistColor', distColor);
+        prefs.setInt('dxfRodColor', rodColor);
         toast(context, '正在生成 DXF…');
         try {
           final corridor =
@@ -1492,6 +1601,14 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
             fixedScale: fixedScale,
             rodLineWidthMm: rodWidthMm,
             showLabelNames: showNames,
+            // 图框：用户 DXF 原样搬用（尺寸不变，装不下自动分幅）
+            frame: useFrame ? await FrameLibrary.load() : null,
+            // 颜色覆盖：用户在"出图颜色"里选的自定义色
+            colorOverrides: {
+              if (labelColor != 0) 'BiaoQian': labelColor,
+              if (distColor != 0) 'JuLi': distColor,
+              if (rodColor != 0) 'GanLu': rodColor,
+            },
           );
           if (context.mounted) {
             // 非致命警告 / 底图三态结构化说明（文件仍正常分享）

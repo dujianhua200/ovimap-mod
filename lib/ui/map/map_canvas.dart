@@ -353,9 +353,10 @@ class _MapCanvasState extends State<MapCanvas> {
     final zoomForAcc = _mapReady ? (cam?.zoom ?? _infoZoom) : _infoZoom;
 
     final polylines = <Polyline>[
-      ...buildSegLines(st, st.labels, isDraft: true),
+      ...buildSegLines(st, st.labels, isDraft: true, camera: cam),
       for (final e in st.overlayLabels.entries)
-        if (st.visibleCids.contains(e.key)) ...buildSegLines(st, e.value),
+        if (st.visibleCids.contains(e.key))
+        ...buildSegLines(st, e.value, camera: cam),
       if (st.mode == AppMode.topoLink) ...buildTopoLines(st),
       if (st.measurePts.length >= 2)
         Polyline(
@@ -604,7 +605,10 @@ int defaultFlagsForCurrentPlatform() {
 
 /// 杆路 / 收藏折线（统一链口径；箱体/文字不打断杆路，与导出一致）。
 List<Polyline> buildSegLines(AppState st, List<MapLabel> pts,
-    {bool isDraft = false}) {
+    {bool isDraft = false, MapCamera? camera}) {
+  // 图标缩进需要当前 zoom 换算"像素→经纬度"；未传时退化为不缩进
+  // （只影响本函数被外部单独调用的场景，正常渲染都会传 camera）。
+  final zoom = camera?.zoom ?? 0.0;
   final lines = <Polyline>[];
   for (final chain in buildLabelChains(pts)) {
     for (var i = 1; i < chain.length; i++) {
@@ -632,6 +636,40 @@ List<Polyline> buildSegLines(AppState st, List<MapLabel> pts,
       }
       final pa = st.toDisplay(a.lat, a.lon);
       final pb = st.toDisplay(b.lat, b.lon);
+
+      // **图标中心不连线**（用户口径：地图上的图标中心不要有连线）。
+      //
+      // 做法与 DXF 一致：按图标在屏幕上的实际半径把线段两端各缩进，
+      // 线只画到图标边缘。半径 = LabelSymbol.symbolSize × 缩放倍率 ÷ 2（像素），
+      // 再按当前 zoom 的分辨率换算成经纬度。
+      final radiusPx =
+          LabelSymbol.symbolSize * _labelScaleForZoom(zoom) / 2;
+      double dLatPerPx = 0, dLonPerPx = 0;
+      if (zoom > 0) {
+        final cosLat =
+            math.cos(((pa[0] + pb[0]) / 2) * math.pi / 180).abs().clamp(0.05, 1.0);
+        final metersPerPx =
+            40075017.0 / (256.0 * math.pow(2, zoom)) * cosLat;
+        if (metersPerPx.isFinite && metersPerPx > 0) {
+          dLatPerPx = metersPerPx / 111320.0;
+          dLonPerPx = metersPerPx / (111320.0 * cosLat);
+        }
+      }
+
+      // 把 [from] 端沿线段方向缩进 [px] 像素（最多 45%，避免短线段反向）。
+      List<double> inset(double fromLat, double fromLon, double toLat,
+          double toLon, double px) {
+        final dLat = toLat - fromLat, dLon = toLon - fromLon;
+        final span = math.max(dLat.abs(), dLon.abs());
+        if (span < 1e-12) return [fromLat, fromLon];
+        final t = math.min(0.45,
+            math.max(px * dLatPerPx / span, px * dLonPerPx / span));
+        return [fromLat + dLat * t, fromLon + dLon * t];
+      }
+
+      final sa = inset(pa[0], pa[1], pb[0], pb[1], radiusPx);
+      final sb2 = inset(pb[0], pb[1], pa[0], pa[1], radiusPx);
+
       if (dashed) {
         // 虚线：手工切段
         const n = 12;
@@ -640,8 +678,10 @@ List<Polyline> buildSegLines(AppState st, List<MapLabel> pts,
           final t0 = k / n, t1 = (k + 1) / n;
           lines.add(Polyline(
             points: [
-              LatLng(pa[0] + (pb[0] - pa[0]) * t0, pa[1] + (pb[1] - pa[1]) * t0),
-              LatLng(pa[0] + (pb[0] - pa[0]) * t1, pa[1] + (pb[1] - pa[1]) * t1),
+              LatLng(sa[0] + (sb2[0] - sa[0]) * t0,
+                  sa[1] + (sb2[1] - sa[1]) * t0),
+              LatLng(sa[0] + (sb2[0] - sa[0]) * t1,
+                  sa[1] + (sb2[1] - sa[1]) * t1),
             ],
             strokeWidth: width,
             color: color,
@@ -649,7 +689,7 @@ List<Polyline> buildSegLines(AppState st, List<MapLabel> pts,
         }
       } else {
         lines.add(Polyline(
-          points: [LatLng(pa[0], pa[1]), LatLng(pb[0], pb[1])],
+          points: [LatLng(sa[0], sa[1]), LatLng(sb2[0], sb2[1])],
           strokeWidth: width,
           color: color,
         ));

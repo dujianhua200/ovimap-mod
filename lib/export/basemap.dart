@@ -801,11 +801,15 @@ class BasemapFetcher {
       final needBld = buildingsOut.length < minBuildings;
       final needPlaces = placesOut.length < minPlaces;
       if ((needRoads || needBld || needPlaces) &&
-          BundledBasemap.covers(bbox[0], bbox[1], bbox[2], bbox[3])) {
+          BundledBasemap.covers(
+              /* lonMin */ bbox[1],
+              /* latMin */ bbox[0],
+              /* lonMax */ bbox[3],
+              /* latMax */ bbox[2])) {
         try {
           final bundled = await BundledBasemap.instance;
           if (needRoads && bundled.roadsLoaded) {
-            final br = bundled.roadsIn(bbox[0], bbox[1], bbox[2], bbox[3]);
+            final br = bundled.roadsIn(bbox[1], bbox[0], bbox[3], bbox[2]);
             if (br.isNotEmpty) {
               // 合并：保留联网抓到的，补上内置里缺的（按名称+首尾点去重）
               final merged = <RoadPoly>[...roadsOut];
@@ -829,7 +833,7 @@ class BasemapFetcher {
             }
           }
           if (needBld && bundled.buildingsLoaded) {
-            final rings = bundled.buildingsIn(bbox[0], bbox[1], bbox[2], bbox[3]);
+            final rings = bundled.buildingsIn(bbox[1], bbox[0], bbox[3], bbox[2]);
             if (rings.isNotEmpty) {
               buildingsOut = [
                 ...buildingsOut,
@@ -843,7 +847,7 @@ class BasemapFetcher {
             }
           }
           if (needPlaces && bundled.placesLoaded) {
-            final bp = bundled.placesIn(bbox[0], bbox[1], bbox[2], bbox[3]);
+            final bp = bundled.placesIn(bbox[1], bbox[0], bbox[3], bbox[2]);
             if (bp.isNotEmpty) {
               final merged = <PlaceFeature>[...placesOut];
               final seen = <String>{

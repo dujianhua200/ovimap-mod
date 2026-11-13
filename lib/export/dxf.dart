@@ -12,6 +12,7 @@ import 'basemap.dart';
 import 'dxf_layers.dart';
 import 'dxf_validate.dart';
 import 'dxf_version.dart';
+import 'frame_template.dart';
 import 'local_basemap.dart';
 import 'topo.dart';
 
@@ -147,6 +148,18 @@ class DxfExporter {
     /// 关掉后只留图块本体（图例块内已含代号字，如 gl004 里的「木」），
     /// 不再额外压一行名称 —— 用户口径："块中间没有连线，没有原字"。
     bool showLabelNames = true,
+
+    /// 图框模板（用户 DXF）。为 null 时用旧的矩形框。
+    ///
+    /// 由调用方通过 `FrameLibrary.load()` 取到并传入；单元测试可直接构造。
+    FrameTemplate? frame,
+
+    /// 图层颜色覆盖：key = 图层名，value = 0xRRGGBB（0 或缺省 = 用默认色）。
+    ///
+    /// 用户口径："标签的颜色实现可选，现在只有黑色，我希望有好几种颜色可选"。
+    /// 常用键：`BiaoQian`（符号）、`JuLi`（距离数字）、`GanLu`（杆路线）、
+    /// `ZhuangHao`（桩号）、`DiMing`（地名）等，与 `DxfLayers.all` 的图层名一致。
+    Map<String, int> colorOverrides = const {},
   }) async {
     final warnings = <String>[];
     final dir = await LabelStore.instance.exportDir();
@@ -196,7 +209,8 @@ class DxfExporter {
     }
 
     // 表（图层 + 文字样式）：R2000 写记录句柄与子类标记，R12 维持原样。
-    _appendTables(c, version, completionRed);
+    _appendTables(c, version, completionRed,
+        colorOverrides: colorOverrides);
 
     // 符号块定义：INSERT 引用，CAD 中可整体移动/复制/编辑（对齐图例）。
     _appendBlocksSection(c, version, usedCatalogBlocks);
@@ -388,19 +402,20 @@ class DxfExporter {
         final segText = GeoUtil.segTextFor(b, _formatDistNoUnit(segmentDistance),
             prefix: segPrefix);
         // 宋体（STYLE 表里注册的是 SimSun）；字高 2.5 —— 用户指定。
-        _text(c, 'JuLi', mx, my + 1.2, segFontM, segText,
-            angle: angle, style: true);
+        // **居中**：让数字正好压在线段中间（原来以左下角为基点，偏右上）。
+        _text(c, 'JuLi', mx, my, segFontM, segText,
+            angle: angle, style: true, centered: true);
         // 盘留标注（段下方第一行）
         var extraY = my - 3.4;
         if (b.slackM > 0) {
           _text(c, 'JuLi', mx, extraY, subFontM, '盘留${_formatSlack(b.slackM)}m',
-              angle: angle, style: true);
+              angle: angle, style: true, centered: true);
           extraY -= 2.6;
         }
         // 本段光缆型号（再下一行）
         if (b.segCable.trim().isNotEmpty) {
           _text(c, 'JuLi', mx, extraY, subFontM, b.segCable.trim(),
-              angle: angle, style: true);
+              angle: angle, style: true, centered: true);
         }
         // 桩号：每杆位置标 K+里程（跨链连续；段距优先用人工确认值）
         if (showStakes) {
@@ -576,8 +591,13 @@ class DxfExporter {
       }
     }
 
-    // 图框（A3 幅面自动比例）+ 图例栏 + 指北针 + 图签（对齐设计院图纸习惯）
-    _appendFrame(c, extMinX, extMinY, extMaxX, extMaxY);
+    // 图框：优先用**用户提供的图框**（assets/frames/frame_a3.dxf，尺寸不变）；
+    // 装不下就分多张（每张一套完整图框）。没有图框资源时退回旧的矩形框。
+    final frameUsed = _appendUserFrameOrFallback(
+        c, frame, extMinX, extMinY, extMaxX, extMaxY);
+    if (!frameUsed) {
+      _appendFrame(c, extMinX, extMinY, extMaxX, extMaxY);
+    }
     if (showLegend) {
       _appendLegend(c, labels, extMinX, extMinY);
     }
@@ -643,13 +663,27 @@ class DxfExporter {
   /// - [styleName] 指定具体文字样式名（如路名的 `SongTi`），优先于 [style]；
   /// - [angle] 非空时写旋转 `50`。
   static void _text(_Ctx c, String layer, double x, double y, double h,
-      String text, {double? angle, bool style = false, String? styleName}) {
+      String text,
+      {double? angle,
+      bool style = false,
+      String? styleName,
+      bool centered = false}) {
     final t = text.replaceAll('\r', ' ').replaceAll('\n', ' ');
     final sn = styleName ?? (style ? 'SimSun' : null);
     c.ent('TEXT', layer, 'AcDbText');
     if (sn != null) c.sb.write('7\n$sn\n');
     c.sb.write('10\n${_fmt(x)}\n20\n${_fmt(y)}\n30\n0\n40\n${_fmt(h)}\n');
     if (angle != null) c.sb.write('50\n${angle.toStringAsFixed(1)}\n');
+    if (centered) {
+      // **文字居中**（用户口径："导出的 DXF 距离数字不在中间"）。
+      //
+      // DXF 的 TEXT 默认以**左下角**为基点（组码 10/20），
+      // 直接把线段中点写进 10/20，文字就会整体偏向右上方。
+      // 正确做法：72=1（水平居中）、73=2（垂直居中），
+      // 再用 11/21 给出**对齐点**（这里就是线段中点），10/20 保留同值。
+      c.sb.write('72\n1\n73\n2\n');
+      c.sb.write('11\n${_fmt(x)}\n21\n${_fmt(y)}\n31\n0\n');
+    }
     c.sb.write('1\n$t\n');
     if (c.r2000) c.sb.write('100\nAcDbText\n');
   }
@@ -885,13 +919,148 @@ class DxfExporter {
     _appendTextCentered(c, 'BeiFangZhen', cx, cy + r + 1.5, 3.5, 'N');
   }
 
-  /// A3 图框：内容包围盒外加 10m 边距画边框。
+  /// RGB → 最接近的 AutoCAD ACI 索引色。
+  ///
+  /// 为什么需要：R12（AC1009）**不支持真彩色**（组码 420 是 R2000+ 才有），
+  /// 只有 ACI 索引色。用户选了自定义颜色后：
+  ///   · R2000 → 直接写 420 真彩色（精确）；
+  ///   · R12   → 退到最接近的 ACI，保证"至少是个像样的颜色"，不是全黑。
+  ///
+  /// 对照表取 AutoCAD 标准 1~9 与常用 2xx 灰阶，覆盖现场用得到的色域。
+  static int _aciForRgb(int rgb) {
+    final r = (rgb >> 16) & 0xFF;
+    final g = (rgb >> 8) & 0xFF;
+    final b = rgb & 0xFF;
+    // 纯黑 / 纯白直接命中
+    if (r < 30 && g < 30 && b < 30) return 7; // 白（CAD 黑底上显示为白）
+    if (r > 230 && g > 230 && b > 230) return 7;
+
+    const table = <int, (int, int, int)>{
+      1: (255, 0, 0), // 红
+      2: (255, 255, 0), // 黄
+      3: (0, 255, 0), // 绿
+      4: (0, 255, 255), // 青
+      5: (0, 0, 255), // 蓝
+      6: (255, 0, 255), // 品红
+      8: (128, 128, 128), // 灰
+      9: (192, 192, 192), // 浅灰
+      30: (255, 127, 0), // 橙
+      140: (0, 63, 255), // 深蓝
+      170: (63, 0, 255), // 紫
+      250: (51, 51, 51), // 近黑
+      252: (153, 153, 153), // 中灰
+    };
+
+    var best = 7;
+    var bestD = 1 << 30;
+    for (final e in table.entries) {
+      final (tr, tg, tb) = e.value;
+      final d = (r - tr) * (r - tr) + (g - tg) * (g - tg) + (b - tb) * (b - tb);
+      if (d < bestD) {
+        bestD = d;
+        best = e.key;
+      }
+    }
+    return best;
+  }
+
+
   static void _appendFrame(_Ctx c, double minX,
       double minY, double maxX, double maxY) {
     const m = 10.0;
     final x0 = minX - m, y0 = minY - m;
     final x1 = maxX + m, y1 = maxY + m;
     _appendRect(c, 'TuQian', x0, y0, x1, y1);
+  }
+
+  /// 用**用户图框**包住内容：尺寸不变，装不下就分多张。
+  ///
+  /// 返回 true 表示已用用户图框（调用方不再画旧矩形框）。
+  ///
+  /// ## 布局口径
+  /// · 内容原样保留在现有坐标里（不改动业务实体）；
+  /// · 图框按"每张容纳 contentWidth × contentHeight"平铺，
+  ///   第一张的左下角与内容包围盒对齐，之后向右/向下排；
+  /// · **每张图框都是完整的**（含图签/图例位置的留白），
+  ///   施工现场按张打印、按张装订。
+  ///
+  /// ## 为什么不做整体缩放
+  /// 用户明确"大小不要变"。缩放会让图框的线宽、字号、图签比例全部失真，
+  /// 打印出来就不合规了。宁可多出几张。
+  static bool _appendUserFrameOrFallback(_Ctx c, FrameTemplate? frame,
+      double minX, double minY, double maxX, double maxY) {
+    if (frame == null || frame.shapes.isEmpty) return false;
+
+    final cw = frame.contentWidth;
+    final ch = frame.contentHeight;
+    if (cw <= 1e-6 || ch <= 1e-6) return false;
+
+    final spanX = (maxX - minX).abs();
+    final spanY = (maxY - minY).abs();
+
+    // 需要几列几行
+    final cols = math.max(1, (spanX / cw).ceil());
+    final rows = math.max(1, (spanY / ch).ceil());
+
+    // 单张且内容明显小于可用区域时，**把内容摆到图框正中**。
+    //
+    // 用户口径："把导出的放到图框里面"。如果图框从内容左下角开始画，
+    // 小范围线路会全挤在左下角、右上半张空白，很不像正式图纸。
+    // 居中后视觉上就是"内容装在图框里"。
+    final originX = minX - frame.contentInset;
+    final originY = minY - frame.contentInset;
+
+    if (cols == 1 && rows == 1) {
+      // 单张：图框中心对准内容中心（视觉上"内容装在图框里"）。
+      final cxContent = (minX + maxX) / 2;
+      final cyContent = (minY + maxY) / 2;
+      final dx = cxContent - frame.width / 2;
+      final dy = cyContent - frame.height / 2;
+      _emitFrameShapes(c, frame, dx, dy);
+    } else {
+      // 多张：按网格平铺，首张对齐内容左下（保证不漏内容）。
+      for (var r = 0; r < rows; r++) {
+        for (var k = 0; k < cols; k++) {
+          final dx = originX + k * cw;
+          final dy = originY + r * ch;
+          _emitFrameShapes(c, frame, dx, dy);
+        }
+      }
+    }
+    return true;
+  }
+
+  /// 把图框图元写到 DXF（平移 dx,dy）。图层统一归到 TuQian，颜色随图框自带。
+  static void _emitFrameShapes(
+      _Ctx c, FrameTemplate frame, double dx, double dy) {
+    for (final s in frame.shapes) {
+      switch (s) {
+        case FrameLine l:
+          _appendLine(c, 'TuQian', l.x1 + dx, l.y1 + dy, l.x2 + dx,
+              l.y2 + dy);
+        case FramePoly p:
+          if (p.pts.length < 2) break;
+          _appendPolyline(c, 'TuQian',
+              [for (final q in p.pts) [q[0] + dx, q[1] + dy]],
+              closed: p.closed, version: c.v);
+        case FrameCircle cc:
+          _appendCircle(c, 'TuQian', cc.cx + dx, cc.cy + dy, cc.r);
+        case FrameText t:
+          final txt = t.text.trim();
+          if (txt.isEmpty) break;
+          _text(c, 'TuQian', t.x + dx, t.y + dy, t.h <= 0 ? 2.5 : t.h,
+              txt, angle: t.rot);
+      }
+    }
+  }
+
+  /// 圆（图框里的圆、印章位等）。
+  static void _appendCircle(
+      _Ctx c, String layer, double cx, double cy, double r) {
+    if (r <= 0) return;
+    c.ent('CIRCLE', layer, 'AcDbCircle');
+    c.sb.write('10\n${_fmt(cx)}\n20\n${_fmt(cy)}\n30\n0\n'
+        '40\n${_fmt(r)}\n');
   }
 
   /// 按 A3 幅面估算比例：**仅按线路包围盒** 较长边(米) ÷ 可打印宽(约 0.40m)，
@@ -1602,19 +1771,30 @@ class DxfExporter {
   /// - R12：维持原样（仅 `62`/`6`，无句柄/子类标记）。
   /// 竣工红（completionRed）时杆路/管廊 ACI 改 1。
   static void _appendTables(
-      _Ctx c, DxfVersion version, bool completionRed) {
+      _Ctx c, DxfVersion version, bool completionRed,
+      {Map<String, int> colorOverrides = const {}}) {
     final specs = DxfLayers.resolve(completionRed: completionRed);
+    // 用户可配颜色：key = 图层名，value = 0xRRGGBB（或 0 = 不覆盖）。
+    int? rgbOf(String layer) {
+      final v = colorOverrides[layer];
+      return (v == null || v == 0) ? null : v;
+    }
+
     c.sb.write('0\nSECTION\n2\nTABLES\n');
     if (version == DxfVersion.r2000) {
       final layerTableH = c.h.next();
       c.sb.write('0\nTABLE\n2\nLAYER\n5\n$layerTableH\n330\n0\n'
           '100\nAcDbSymbolTable\n70\n${specs.length}\n');
       for (final s in specs) {
+        final ov = rgbOf(s.name);
+        final tc = ov ?? s.trueColor;
+        // ACI 跟随真彩色的主色（R12 只有 ACI，靠它表现颜色）。
+        final aci = ov == null ? s.aci : _aciForRgb(ov);
         c.sb.write('0\nLAYER\n5\n${c.h.next()}\n330\n$layerTableH\n'
             '100\nAcDbSymbolTableRecord\n100\nAcDbLayerTableRecord\n'
-            '2\n${s.name}\n70\n0\n62\n${s.aci}\n6\n${s.lineType}\n');
+            '2\n${s.name}\n70\n0\n62\n$aci\n6\n${s.lineType}\n');
         c.sb.write('370\n${s.lineWeight}\n');
-        if (s.trueColor != null) c.sb.write('420\n${s.trueColor}\n');
+        if (tc != null) c.sb.write('420\n$tc\n');
       }
       c.sb.write('0\nENDTAB\n');
       final styleTableH = c.h.next();
@@ -1634,7 +1814,9 @@ class DxfExporter {
     } else {
       c.sb.write('0\nTABLE\n2\nLAYER\n70\n${specs.length}\n');
       for (final s in specs) {
-        c.sb.write('0\nLAYER\n2\n${s.name}\n70\n0\n62\n${s.aci}\n6\n${s.lineType}\n');
+        final ov = rgbOf(s.name);
+        final aci = ov == null ? s.aci : _aciForRgb(ov);
+        c.sb.write('0\nLAYER\n2\n${s.name}\n70\n0\n62\n$aci\n6\n${s.lineType}\n');
       }
       c.sb.write('0\nENDTAB\n');
       c.sb.write('0\nTABLE\n2\nSTYLE\n70\n2\n');
