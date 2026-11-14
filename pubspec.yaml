@@ -1,7 +1,7 @@
 name: ovimap
 description: "滑洲云图 - 通信线路工程勘察设计与竣工测量工具"
 publish_to: 'none'
-version: 3.25.0+43
+version: 3.26.0+44
 
 environment:
   sdk: ^3.13.2
