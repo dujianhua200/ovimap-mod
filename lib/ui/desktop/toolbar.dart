@@ -42,6 +42,9 @@ class Toolbar extends StatelessWidget {
     required this.onToggleLeft,
     required this.onToggleRight,
     this.sync,
+
+    /// 地图搜索回调（查地名/建筑/店铺）。为 null 时不显示搜索框。
+    this.onMapSearch,
   });
 
   final AppState st;
@@ -66,6 +69,10 @@ class Toolbar extends StatelessWidget {
 
   /// 云同步编排器（可为 null：未接入同步的环境 → 圆点显示「仅本地」）。
   final SyncController? sync;
+
+  /// 地图搜索回调：用户输入地名/建筑名/店铺名后回调，由工作区负责
+  /// 调 SearchService、展示结果列表并跳转。为 null 时不显示搜索框。
+  final void Function(String query)? onMapSearch;
 
   /// 工具栏高度。从 48 压到 42：桌面三栏壳里纵向每 6px 都是地图面积，
   /// 而图标本身 20px，42 仍是舒适点击区。
@@ -131,7 +138,17 @@ class Toolbar extends StatelessWidget {
               onTap: onInspect),
           _btn(Icons.ios_share, tooltip: '导出成果 Ctrl+E', onTap: onExport),
           _syncBtn(context),
-          const Spacer(),
+          const SizedBox(width: 10),
+          // **地图搜索框**（v3.21）：工具栏右侧留白处，仿奥维顶部搜索。
+          //
+          // 与左栏的"工程名搜索"不是一回事：
+          //   · 左栏 = 自己收藏夹里的工程/标记（本地过滤）；
+          //   · 这里 = 查**地图上的地名/建筑/店铺**（走 SearchService：
+          //     高德 POI 优先，回落天地图，再回落境外 Nominatim/Photon）。
+          // 选中结果后跳转并放临时标记，与移动端 `_doSearch` 行为一致。
+          const Expanded(child: SizedBox()),
+          if (onMapSearch != null) _MapSearchBox(onSearch: onMapSearch!),
+          const SizedBox(width: 8),
           // 左栏收起按钮已删（v3.7）：收藏夹图标轨道本身就是收展入口，两个入口重复。
           _btn(
               rightCollapsed ? Icons.chevron_left : Icons.chevron_right,
@@ -363,4 +380,70 @@ class Toolbar extends StatelessWidget {
       height: 22,
       margin: const EdgeInsets.symmetric(horizontal: 4),
       color: TokC.divider);
+}
+
+/// 工具栏右侧的地图搜索框（仿奥维顶部搜索）。
+///
+/// 回车触发 [onSearch]；带清空按钮与加载态。输入框本身只负责收集文字，
+/// 查询、结果列表、跳转都交给工作区 —— 因为需要 MapController 才能移动地图。
+class _MapSearchBox extends StatefulWidget {
+  const _MapSearchBox({required this.onSearch});
+
+  final void Function(String query) onSearch;
+
+  @override
+  State<_MapSearchBox> createState() => _MapSearchBoxState();
+}
+
+class _MapSearchBoxState extends State<_MapSearchBox> {
+  final _ctl = TextEditingController();
+
+  @override
+  void dispose() {
+    _ctl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final q = _ctl.text.trim();
+    if (q.isEmpty) return;
+    widget.onSearch(q);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 260,
+      height: 30,
+      child: TextField(
+        controller: _ctl,
+        onSubmitted: (_) => _submit(),
+        textInputAction: TextInputAction.search,
+        style: const TextStyle(color: kTextMain, fontSize: 12.5),
+        decoration: InputDecoration(
+          hintText: '搜索地名 / 建筑 / 店铺',
+          hintStyle: const TextStyle(color: kTextHint, fontSize: 12.5),
+          isDense: true,
+          filled: true,
+          fillColor: TokC.field,
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          prefixIcon: const Icon(Icons.search, size: 16, color: kTextSub),
+          prefixIconConstraints:
+              const BoxConstraints(minWidth: 30, minHeight: 20),
+          suffixIcon: IconButton(
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 28, minHeight: 20),
+            icon: const Icon(Icons.arrow_forward, size: 15, color: kAccent),
+            tooltip: '搜索（回车）',
+            onPressed: _submit,
+          ),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(6),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      ),
+    );
+  }
 }

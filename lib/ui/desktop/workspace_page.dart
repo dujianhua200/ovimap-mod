@@ -12,6 +12,7 @@ import '../../services/export_saver.dart';
 import '../../services/file_drop.dart';
 import '../../services/photos.dart';
 import '../../services/platform_caps.dart';
+import '../../services/search.dart';
 import '../../services/tile_cache.dart';
 import '../../services/track_check.dart';
 import '../../state/app_state.dart';
@@ -427,6 +428,125 @@ class _WorkspacePageState extends State<WorkspacePage> {
   /// 「定位」回调用到了地图相机 —— 这正是体检结果必须由**壳**来打开的原因：
   /// 引擎（route_check）与面板（inspect_dialog）都不持有 `MapController`，
   /// 保持"纯逻辑 / 纯呈现 / 相机归壳"的分层。
+  /// **地图搜索**（v3.21，工具栏右侧搜索框）。
+  ///
+  /// 与左栏"工程名搜索"不同：这里查的是**地图上的地名/建筑/店铺**，
+  /// 走 `SearchService`（高德 POI 优先 → 天地图 → 境外 Nominatim/Photon），
+  /// 与移动端 `_doSearch` 完全同一套数据源与排序（按距地图中心升序）。
+  ///
+  /// 支持直接输入经纬度（含度分秒）跳转 —— 现场最常用。
+  Future<void> _mapSearch(String q) async {
+    final st = _st;
+    if (q.trim().isEmpty) return;
+
+    // ① 坐标输入优先（现场快捷跳转）
+    final coord = GeoUtil.parseCoordInput(q);
+    if (coord != null) {
+      final d = st.toDisplay(coord[0], coord[1]);
+      _mc.moveAndRotate(LatLng(d[0], d[1]), 17, _mc.camera.rotation);
+      if (mounted) toast(context, '已跳转到输入坐标');
+      return;
+    }
+
+    // ② 以当前地图中心为基准排序
+    final cam0 = _mc.camera;
+    final near = st.toWgs(cam0.center.latitude, cam0.center.longitude);
+
+    List<SearchResult> results;
+    try {
+      results = await SearchService.search(
+        q,
+        amapKey: st.amapKey,
+        tdtKey: st.tiandituKey,
+        nearLat: near[0],
+        nearLon: near[1],
+        convertGcj: st.tdtConvertGcj,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      toast(
+          context,
+          (st.amapKey.isEmpty && st.tiandituKey.isEmpty)
+              ? '未配置高德/天地图 Key，只能走境外慢源（可能搜不到）。'
+                  '请在「设置 → 高德 Key / 天地图 Key」填写后更快更准；'
+                  '也可直接输入经纬度（支持度分秒）'
+              : '搜索失败，可直接输入经纬度（支持度分秒）');
+      return;
+    }
+    if (!mounted) return;
+    if (results.isEmpty) {
+      toast(context, '未找到「$q」，可换关键词或输入经纬度');
+      return;
+    }
+
+    // ③ 结果列表 → 选中跳转
+    await showDarkDialog(
+      context,
+      title: '搜索结果（按距中心排序）',
+      content: SizedBox(
+        width: 520,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 380),
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: results.length,
+            itemBuilder: (ctx, i) {
+              final r = results[i];
+              final dist = SearchService.haversineM(
+                  near[0], near[1], r.lat, r.lon);
+              return InkWell(
+                onTap: () {
+                  Navigator.pop(ctx);
+                  final d = st.toDisplay(r.lat, r.lon);
+                  _mc.moveAndRotate(
+                      LatLng(d[0], d[1]), 17, _mc.camera.rotation);
+                  toast(ctx, '已定位：${r.name}');
+                },
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(vertical: 7, horizontal: 2),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.place, size: 15, color: kAccent),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(r.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    color: kTextMain, fontSize: 13)),
+                            const SizedBox(height: 2),
+                            Text(
+                              r.address.isEmpty
+                                  ? '距中心 ${(dist / 1000).toStringAsFixed(2)} km'
+                                  : '${r.address}  ·  '
+                                      '距中心 ${(dist / 1000).toStringAsFixed(2)} km',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  color: kTextSub, fontSize: 11.5),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+      actions: [
+        darkTextBtn('关闭', () => Navigator.pop(context), color: kTextSub),
+      ],
+    );
+  }
+
   Future<void> _inspect() async {
     final st = _st;
     if (st.labels.isEmpty) {
@@ -750,6 +870,7 @@ class _WorkspacePageState extends State<WorkspacePage> {
                 onExport: _export,
                 onSync: _showSyncInfo,
                 onInspect: _inspect,
+                onMapSearch: _mapSearch,
                 leftCollapsed: !_favOpen,
                 rightCollapsed: _rightCollapsed,
                 onToggleLeft: () =>
