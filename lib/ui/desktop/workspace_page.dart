@@ -564,6 +564,54 @@ class _WorkspacePageState extends State<WorkspacePage> {
   ///
   /// 取所有相关点的重心作为落点（段级问题给的是两个端点，看重心才能同时看到两端），
   /// 并把缩放抬到 18 以上 —— 出图体检关心的是"这一档"，级别太低看不见细节。
+  /// **双击工程 → 定位到该工程**（v3.24）。
+  ///
+  /// 用户口径："所有的工程双击就能定位现在的工程在什么位置，
+  /// 不然体验不好；手机单击就行"。
+  ///
+  /// 行为：取该工程全部点算外包范围 → 打开工程 → 地图飞到该范围。
+  Future<void> _locateProject(String cid) async {
+    final st = _st;
+    final labels = st.overlayLabels[cid] ?? const <MapLabel>[];
+
+    // 打开工程（先切过去再定位，避免"定位了但侧栏还是别的工程"）
+    try {
+      final meta = st.collections.firstWhere((c) => c.id == cid);
+      await st.openCollection(meta);
+    } catch (_) {
+      // 找不到 meta 也继续定位（点数据已在 overlayLabels 里）
+    }
+
+    if (labels.isEmpty) {
+      if (mounted) toast(context, '该工程还没有点，已打开供继续编辑');
+      return;
+    }
+
+    var minLat = 90.0, maxLat = -90.0, minLon = 180.0, maxLon = -180.0;
+    for (final l in labels) {
+      if (l.lat < minLat) minLat = l.lat;
+      if (l.lat > maxLat) maxLat = l.lat;
+      if (l.lon < minLon) minLon = l.lon;
+      if (l.lon > maxLon) maxLon = l.lon;
+    }
+    final d1 = st.toDisplay(minLat, minLon);
+    final d2 = st.toDisplay(maxLat, maxLon);
+    final sw = LatLng(d1[0], d1[1]);
+    final ne = LatLng(d2[0], d2[1]);
+
+    if (!_mapReady) return;
+    if ((minLat - maxLat).abs() < 1e-7 && (minLon - maxLon).abs() < 1e-7) {
+      _mc.move(sw, 18); // 只有一个点
+    } else {
+      _mc.fitCamera(CameraFit.bounds(
+        bounds: LatLngBounds(sw, ne),
+        padding: const EdgeInsets.all(40),
+        maxZoom: 18,
+      ));
+    }
+    if (mounted) toast(context, '已定位到工程（${labels.length} 个点）');
+  }
+
   void _locateLabels(List<String> ids) {
     final hits = labelsByIds(_st, ids);
     if (hits.isEmpty) return;
@@ -995,6 +1043,8 @@ class _WorkspacePageState extends State<WorkspacePage> {
         onNewProject: _newProject,
         // 段落/点位行点击 → 与体检「定位」同一条路径（相机归壳）。
         onLocate: (l) => _locateLabels([l.id]),
+        // **双击工程 → 定位到工程范围**（v3.24）
+        onLocateProject: _locateProject,
         // 悬浮面板标题栏的「收起」按钮。
         onClose: () => setState(() => _favOpen = false),
       );

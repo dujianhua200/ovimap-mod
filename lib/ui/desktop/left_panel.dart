@@ -36,6 +36,7 @@ class LeftPanel extends StatefulWidget {
     this.searchFocus,
     required this.onNewProject,
     this.onLocate,
+    this.onLocateProject,
     this.onClose,
   });
 
@@ -47,6 +48,15 @@ class LeftPanel extends StatefulWidget {
 
   /// 点击段落/点位行 → 外壳把地图移过去并选中该点（相机归壳，左栏不持 `MapController`）。
   final void Function(MapLabel l)? onLocate;
+
+  /// **双击工程 → 定位到该工程的位置**（v3.24）。
+  ///
+  /// 用户口径："所有的工程双击就能定位，不然体验不好；手机单击就行"。
+  /// 桌面端用双击（单击已是"打开工程"，与文件管理器习惯一致），
+  /// 移动端用单击。
+  ///
+  /// 参数是工程 id；工作区负责取该工程所有点、算范围并把地图移过去。
+  final void Function(String cid)? onLocateProject;
 
   /// 面板以叠加方式悬浮在地图上时，标题栏出现「收起」按钮（见 workspace_page）。
   final VoidCallback? onClose;
@@ -1194,6 +1204,11 @@ class _LeftPanelState extends State<LeftPanel> {
       child: InkWell(
         borderRadius: BorderRadius.circular(TokR.m),
         onTap: () => _onItemTap(m),
+        // **双击 = 定位到该工程**（v3.24，用户："双击就能定位"）。
+        // 单击仍是打开工程（与文件管理器一致），不动原有习惯。
+        onDoubleTap: widget.onLocateProject == null
+            ? null
+            : () => widget.onLocateProject!(m.id),
         // 右键 = ⋮ 菜单（桌面惯例）。此前删除/重命名只藏在 ⋮ 里，
         // 用户反馈"没有删除功能"实为入口不可发现。
         onSecondaryTapUp: (d) => _showItemMenu(m, d.globalPosition),

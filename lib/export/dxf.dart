@@ -1247,7 +1247,12 @@ class DxfExporter {
       // 原来用 `cw`（contentWidth = 368.5）当步长，而图框实际宽 392 ——
       // 相邻两张重叠 23.5 个单位，用户看到的就是"两套图框叠在一起"。
       // 现在步长 = 图框宽/高 + 间隙，保证既不重叠也不留过大空档。
-      const gap = 12.0; // 两张图框之间留 12 个单位，打印后便于裁切
+      // **图框之间不能有缝隙**（v3.24，用户明确要求）。
+      //
+      // v3.23 我给相邻图框留了 12 个单位的间隙（本意是便于裁切），
+      // 但用户要的是"贴在一起" —— 现场打印时整卷连着出，缝隙反而碍事。
+      // 现在步长 = 图框实际尺寸，两张严丝合缝地相接。
+      const gap = 0.0;
       final stepX = frame.width + gap;
       final stepY = frame.height + gap;
       final oX = routeMinX - frame.contentInset;
@@ -1320,14 +1325,40 @@ class DxfExporter {
     // 用静态缓存避免每次重算
     final rows = _frameRowCache;
     if (rows.length < 2) return y;
+
+    // **取最近的格中心**（v3.24 修）。
+    //
+    // 旧实现从下往上扫，条件是 `y >= bot-h && y <= top+h` —— 容差 ±h
+    // 让文字很容易先命中**上一格**，于是吸附方向错一整格：
+    // 实测"审核" 在 -75.23（本该落在 -75.23 这格），却被吸到 -69.34。
+    //
+    // 改为遍历所有格中心，取 |y - center| 最小的那个，语义明确、不会串格。
+    var bestCenter = y;
+    var bestD = double.infinity;
     for (var i = 0; i < rows.length - 1; i++) {
       final top = rows[i], bot = rows[i + 1];
-      // 允许 ±h 的容差（文字基线本来就不在中心）
-      if (y >= bot - h && y <= top + h) {
-        return (top + bot) / 2;
+      final c = (top + bot) / 2;
+      final d = (y - c).abs();
+      if (d < bestD) {
+        bestD = d;
+        bestCenter = c;
       }
     }
-    return y;
+    // 只吸附"确实属于某个格子"的文字：距离超过一格高就不动
+    // （避免把指北针的 N、标题区大字吸到图签里）
+    final maxCellH = _maxRowGap(rows);
+    if (bestD > maxCellH) return y;
+    return bestCenter;
+  }
+
+  /// 相邻格高的最大值（用于判断文字是否属于图签区域）。
+  static double _maxRowGap(List<double> rows) {
+    var m = 0.0;
+    for (var i = 1; i < rows.length; i++) {
+      final d = (rows[i - 1] - rows[i]).abs();
+      if (d > m) m = d;
+    }
+    return m;
   }
 
   /// 图框水平格线缓存（y 从高到低）。

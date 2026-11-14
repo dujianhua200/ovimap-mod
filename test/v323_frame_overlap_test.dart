@@ -84,8 +84,9 @@ void main() {
       final step = lefts[1] - lefts[0];
       // ignore: avoid_print
       print('平移步长: ${step.toStringAsFixed(1)}');
-      expect(step, greaterThanOrEqualTo(f.width),
-          reason: '平移步长应 ≥ 图框宽（否则重叠），实际 $step');
+      // v3.24 起用户要求"图框之间不能有缝隙" → 步长 == 图框宽（严丝合缝）
+      expect(step, closeTo(f.width, 0.5),
+          reason: '步长应等于图框宽（不重叠且不留缝），实际 $step');
     });
 
     test('单幅时不出现第二套图框', () async {
