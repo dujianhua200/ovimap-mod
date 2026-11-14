@@ -178,6 +178,13 @@ class DxfExporter {
 
     /// 是否画**图签栏**（左下那个 5 行统计框）。默认 true。
     bool showTitleBlock = true,
+
+    /// 对**注入的底图**（[basemap] 参数）是否也按沿线路缓冲裁剪。
+    ///
+    /// 默认 false：注入即代表调用方已决定范围（测试、预览都靠这个语义）。
+    /// 从 UI 导出时传 true，让"底图范围"档位真实生效。
+    /// 本地底图（[localBasemap]）与联网抓取始终按范围裁剪，不受此开关影响。
+    bool clipInjectedBasemap = false,
   }) async {
     final warnings = <String>[];
     final dir = await LabelStore.instance.exportDir();
@@ -314,7 +321,15 @@ class DxfExporter {
     // 数据来源优先级：导入的本地开源矢量（离线）> 注入/缓存/网络抓取。
     BasemapFetchReport? report;
     if (includeSurroundings) {
-      final BasemapData bm;
+      var bm = const BasemapData(
+        roads: [], buildings: [], places: [],
+        report: BasemapFetchReport(
+          roads: DatasetReport(FetchState.ok, source: ''),
+          buildings: DatasetReport(FetchState.ok, source: ''),
+          places: DatasetReport(FetchState.ok, source: ''),
+          extras: DatasetReport(FetchState.ok, source: ''),
+        ),
+      );
       if (localBasemap != null) {
         // 本地底图也尊重「范围档位」：裁到线路外扩 bbox，做到「只导出范围内」。
         // **裁剪结果为空时必须就用空底图**（`bm = cropped`）——**绝不回退全量**。
@@ -322,11 +337,30 @@ class DxfExporter {
         // 底图数据空白处（如罗山/光山/新县农村），裁剪为空 → 回退 → 整个信阳
         // 4.4 万要素全写进 DXF。此处改为「空就是空 + 明确中文提示」，绝不兜底全量。
         final bbox = BasemapFetcher.boundsOf(labels, rangeM);
+        // **严格按范围裁剪**（v3.20 修：用户设 50m 却导出 ~105m 宽）。
+        //
+        // 原 `toleranceM: rangeM * 0.1` 是"向外放 10%"的容差，本意是避免
+        // 路口被切碎。但它叠加在两处放大上：
+        //   ① 建筑"任一点在框内即保留整栋" —— 大建筑可多探出几十米；
+        //   ② 道路裁剪也用同一个容差外扩。
+        // 结果 50m 的设置实际画出 ~105m，用户感觉"设置没什么用"。
+        //
+        // 改为 toleranceM: 0（严格按框）。路口被切的碎一点可以接受，
+        // 但**范围必须说了算** —— 用户调档位要能看见效果。
         var cropped = GeoJsonImporter.cropTo(
           localBasemap,
           bbox,
-          toleranceM: rangeM * 0.1, // 框边界适度外扩，避免路口被切断得太碎
+          toleranceM: 0,
         );
+        // **再按"沿线路缓冲"裁一次**（v3.20，用户："设 50 米但导出的太广"）。
+        //
+        // 第一刀是按**外包矩形**裁的。线路是折线、横跨几百米时，
+        // 外包矩形会把两个远端之间的整片空地也框进来 —— 50 米的设置
+        // 在矩形内处处成立，但图面上看就是"范围大得多"。
+        //
+        // 这里改成逐要素判定"到线路的最近距离 ≤ rangeM"：
+        // 只有贴着杆路两侧 50m 内才保留，远端连线之间的空白不再进图。
+        cropped = _cropByRouteBuffer(cropped, labels, rangeM);
         // R3 防御性上限：进入渲染前兜底截断，防病态巨型文件（详见 capFeatures 文档）。
         cropped = GeoJsonImporter.capFeatures(
           cropped,
@@ -346,7 +380,14 @@ class DxfExporter {
         }
         bm = cropped;
       } else if (basemap != null) {
-        bm = basemap;
+        // 注入的底图（测试 / 预览 / 调用方自备数据）**默认原样使用**。
+        //
+        // 语义上"注入"就代表调用方已经决定好要什么范围了，我们不该再裁。
+        // 需要按范围收紧时，调用方显式传 `clipInjectedBasemap: true`，
+        // 或自己先裁好再传进来。
+        bm = clipInjectedBasemap
+            ? _cropByRouteBuffer(basemap, labels, rangeM)
+            : basemap;
       } else {
         bm = await BasemapFetcher.fetchFor(
           labels,
@@ -358,6 +399,9 @@ class DxfExporter {
           convertGcj: convertGcj,
           refresh: refreshBasemap,
         );
+        // 网络抓取走的是外包矩形；再按沿线路缓冲收一次，
+        // 保证"范围档位"在三条数据来源上口径一致。
+        bm = _cropByRouteBuffer(bm, labels, rangeM);
       }
       report = bm.report;
       warnings.addAll(bm.report.toWarnings());
@@ -648,7 +692,10 @@ class DxfExporter {
     // 传两套范围：
     //   · ext* = 含底图的总包围盒（决定图框最终摆哪、要不要居中）
     //   · route* = 只有杆路的范围（决定**分几幅**）
-    final frameUsed = _appendUserFrameOrFallback(c, frame,
+    //
+    // 先把图框里写死的示例工程名换成用户的工程名（v3.20）。
+    final frame2 = frame?.replaceProjectName(name);
+    final frameUsed = _appendUserFrameOrFallback(c, frame2,
         extMinX, extMinY, extMaxX, extMaxY, routeMinX, routeMinY,
         routeMaxX, routeMaxY);
     if (!frameUsed) {
@@ -659,11 +706,24 @@ class DxfExporter {
     }
     if (showNorthArrow) _appendNorthArrow(c, extMaxX, extMaxY);
     if (showTitleBlock) {
-      _appendTitleBlock(c, extMinX, extMinY, extMaxX, extMaxY,
-          name: name,
-          totalPoints: labels.length,
-          totalLength: routeTotalLen,
-          scale: routeScale);
+      if (frameUsed) {
+        // **有用户图框时，往图框自带的图签格子里填字**，不再另画一个（v3.20）。
+        //
+        // 用户图框（新块.dxf）自带完整图签：5 行格线 y=0.70~30.18、
+        // 且"中国通信建设第一工程局有限公司""图号 01"等已经排好版。
+        // 我们再画一个 120×30 的图签，就会两个框叠加、文字互相错位 ——
+        // 这就是用户反复说"下方的字还是错行"的真正原因。
+        _fillFrameTitleCells(c, frame2!, name: name,
+            totalPoints: labels.length,
+            totalLength: routeTotalLen,
+            scale: routeScale);
+      } else {
+        _appendTitleBlock(c, extMinX, extMinY, extMaxX, extMaxY,
+            name: name,
+            totalPoints: labels.length,
+            totalLength: routeTotalLen,
+            scale: routeScale);
+      }
     }
 
     sb.write('0\nENDSEC\n');
@@ -1355,6 +1415,105 @@ class DxfExporter {
 
   /// 图签：右下角矩形分格（约 120m × 30m），设计院图纸角标习惯。
   /// 内容：工程名 / 滑洲云图导出 / 导出日期 / 总点数·总长度 / A3 自动比例。
+  /// 按**沿线路缓冲**再裁一次底图（v3.20）。
+  ///
+  /// ## 为什么需要第二刀
+  /// 第一刀 `GeoJsonImporter.cropTo` 是按**外包矩形**裁的。
+  /// 线路是折线（用户这条横跨 688×677 米），外包矩形会把两个远端之间的
+  /// 整片区域都框进来 —— 用户设"沿线 50 米"，看到的却是近 1 公里的图面。
+  ///
+  /// 这里逐要素判断"到线路的最近距离 ≤ [rangeM]"：
+  ///  · 道路：折线任一点在缓冲内即保留**整条被裁后的段**；
+  ///  · 建筑：外环任一点在缓冲内即保留整栋（封闭面不裁几何）；
+  ///  · 地名：点判断。
+  static BasemapData _cropByRouteBuffer(
+      BasemapData bm, List<MapLabel> labels, double rangeM) {
+    if (rangeM <= 0 || labels.isEmpty) return bm;
+
+    bool near(double lat, double lon) =>
+        BasemapFetcher.distToRouteM(labels, lat, lon) <= rangeM;
+
+    final roads = <RoadPoly>[];
+    for (final r in bm.roads) {
+      if (r.pts.any((p) => near(p[0], p[1]))) roads.add(r);
+    }
+    final buildings = <BuildingPoly>[];
+    for (final b in bm.buildings) {
+      var hit = false;
+      for (final ring in b.rings) {
+        for (final p in ring) {
+          if (near(p[0], p[1])) {
+            hit = true;
+            break;
+          }
+        }
+        if (hit) break;
+      }
+      if (hit) buildings.add(b);
+    }
+    final places = bm.places.where((p) => near(p.lat, p.lon)).toList();
+
+    return BasemapData(
+      roads: roads,
+      buildings: buildings,
+      places: places,
+      report: BasemapFetchReport(
+        roads: DatasetReport(FetchState.ok,
+            source: 'local+沿线路${rangeM.round()}m', count: roads.length),
+        buildings: DatasetReport(FetchState.ok,
+            source: 'local+沿线路${rangeM.round()}m', count: buildings.length),
+        places: DatasetReport(FetchState.ok,
+            source: 'local+沿线路${rangeM.round()}m', count: places.length),
+      ),
+    );
+  }
+
+  /// 往**用户图框自带的图签格子**里填统计信息。
+  ///
+  /// ## 为什么需要它
+  /// 用户图框（`assets/frames/frame_a3.dxf`）自带完整图签：右下角 5 行格线
+  /// （块内 y = 0.70 / 6.60 / 12.49 / 18.39 / 24.29 / 30.18，每格高 ≈5.9），
+  /// 而且"中国通信建设第一工程局有限公司""图号 01"等文字已经排好。
+  ///
+  /// 我们再画一个 120×30 的图签 → **两个框叠在一起、文字互不对齐**，
+  /// 就是用户反复反馈"下方的字还是错行"的根因。
+  ///
+  /// ## 做法
+  /// 不画框，只往**最左一列的空白格**里写工程名/日期/统计。
+  /// 格子的位置直接从图框图元的 bbox 推出来（图签固定贴在右下角）。
+  static void _fillFrameTitleCells(_Ctx c, FrameTemplate frame,
+      {required String name,
+      required int totalPoints,
+      required double totalLength,
+      required int scale}) {
+    // 图签区：右下角，宽约 45%、高约 30 单位的条带（从图框底边起算）。
+    const tbH = 30.0;
+    final tbW = frame.width * 0.46;
+    final x0 = frame.width - tbW; // 图签左边线（图框内坐标）
+    final y0 = 0.0; // 图框底边
+
+    // 5 行，与图框格线一致
+    const rows = 5;
+    final rowH = tbH / rows;
+    final date = DateTime.now();
+    final vals = <String>[
+      (name.isEmpty ? '未命名项目' : name),
+      '滑洲云图  $date'.replaceAll(RegExp(r'\s+'), ' '),
+      '点数 $totalPoints',
+      '长度 ${_formatDistNoUnit(totalLength)}m',
+      '1:$scale',
+    ];
+
+    // 字高：不超格高 62%，与图框里已有文字（2.36~3.54）协调
+    final fontH = math.min(2.6, rowH * 0.55);
+    for (var i = 0; i < rows; i++) {
+      // 行 i 的垂直中心（自底部起算）
+      final cy = y0 + rowH * i + rowH / 2;
+      _text(c, 'TuQian', x0 + 2.0, cy, fontH, vals[i], centered: true);
+    }
+  }
+
+  /// 图签（无用户图框时的自带版本，120×30 五行）。
   static void _appendTitleBlock(
       _Ctx c, double minX, double minY, double maxX, double maxY,
       {required String name,

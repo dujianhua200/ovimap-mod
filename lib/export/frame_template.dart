@@ -100,6 +100,28 @@ class FrameTemplate {
     final rows = math.max(1, (contentH / contentHeight).ceil());
     return (cols: cols, rows: rows);
   }
+
+  /// **替换图框里写死的工程名**（v3.20）。
+  ///
+  /// 用户图框的"新县福星园三期"是硬编码在图块里的示例工程名。
+  /// 导出时应换成用户自己的工程名 —— 用户口径：
+  /// "新县福星园三期 这个用工程名称自动代替"。
+  ///
+  /// 做法：找出文字里含 [placeholder] 的那条，把 content 换掉；
+  /// 找不到就**保留原样**（不猜、不乱改别的文字）。
+  FrameTemplate replaceProjectName(String newName, {String placeholder = '新县福星园三期'}) {
+    if (newName.trim().isEmpty) return this;
+    final out = <FrameShape>[];
+    for (final s in shapes) {
+      if (s is FrameText && s.text.contains(placeholder)) {
+        out.add(FrameText(s.x, s.y, s.h, s.rot,
+            s.text.replaceAll(placeholder, newName.trim()), s.layer));
+      } else {
+        out.add(s);
+      }
+    }
+    return FrameTemplate(out, width, height);
+  }
 }
 
 /// 加载内置图框（assets/frames/frame_a3.dxf）。

@@ -105,9 +105,25 @@ class GeoJsonImporter {
       }
     }
 
-    final buildings = bm.buildings
-        .where((b) => b.rings.any((ring) => ring.any((p) => inB(p[0], p[1]))))
-        .toList();
+    // 建筑：**质心在框内**才保留（v3.20 收紧）。
+    //
+    // 原规则"任一点在框内即保留整栋"会让一个跨在框边的大厂房把整栋
+    // 画进来，向框外多探出几十米 —— 用户设 50m 范围却看到 100m+ 的图面。
+    // 改看质心：只保留"主体在范围内"的建筑，边界处的半截房子不画。
+    // 这与"范围说了算"的用户预期一致，也避免了图面外溢。
+    final buildings = bm.buildings.where((b) {
+      if (b.rings.isEmpty) return false;
+      // 用外环顶点均值当质心（环已闭合，均值即重心附近）
+      final outer = b.rings.first;
+      if (outer.isEmpty) return false;
+      var sy = 0.0, sx = 0.0;
+      for (final p in outer) {
+        sy += p[0];
+        sx += p[1];
+      }
+      final cy = sy / outer.length, cx = sx / outer.length;
+      return inB(cy, cx);
+    }).toList();
     final places = bm.places.where((p) => inB(p.lat, p.lon)).toList();
     return BasemapData(
       roads: roads,

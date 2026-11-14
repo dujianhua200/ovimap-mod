@@ -1681,6 +1681,8 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
             // 指北针 / 图签栏（用户："方框和中间是正三角形的符号不要"）
             showNorthArrow: showNorth,
             showTitleBlock: showTitle,
+            // 让"底图范围"档位对注入的本地底图也生效
+            clipInjectedBasemap: true,
           );
           if (context.mounted) {
             // 非致命警告 / 底图三态结构化说明（文件仍正常分享）
