@@ -94,6 +94,83 @@ class FrameTemplate {
     return FrameTemplate(moved, width, height);
   }
 
+  /// 从图框里**实测**图签格位（v3.21）。
+  ///
+  /// ## 为什么必须实测
+  /// 之前 `_fillFrameTitleCells` 按凭空估的 "30 单位高、46% 宽" 算格子，
+  /// 而用户图框的真实格线是 y = 0.70 / 6.60 / 12.49 / 18.39 / 24.29 / 30.18，
+  /// 格高 5.89~5.90（不是 6.0）。估出来的中心和真实中心差 1~1.6 个单位，
+  /// 文字就掉到格子下沿 —— 用户说的"字老错行，没在表格内"。
+  ///
+  /// ## 识别方法
+  /// 图签是"右下角一组等距水平线"。做法：
+  ///  · 取所有水平线，按 y 聚类；
+  ///  · 找连续 4~6 条、间距相近（±15%）、且都落在右下角（x 起点偏右）的那组；
+  ///  · 返回这组线的 y 值（从高到低）与其 x 范围。
+  ///
+  /// 找不到就返回 null，调用方回退到估算。
+  ({List<double> ys, double x0, double x1})? findTitleBlockRows() {
+    // 收集水平线（y 相同即水平）
+    final hs = <({double y, double x0, double x1})>[];
+    for (final s in shapes) {
+      if (s is FrameLine && (s.y1 - s.y2).abs() < 0.01) {
+        final a = math.min(s.x1, s.x2), b = math.max(s.x1, s.x2);
+        hs.add((y: (s.y1 + s.y2) / 2, x0: a, x1: b));
+      }
+    }
+    if (hs.length < 4) return null;
+
+    // 按 y 降序
+    hs.sort((a, b) => b.y.compareTo(a.y));
+
+    // 图签在右下角：x 起点应大于图框宽度的一半
+    final rightHalf = width * 0.42;
+
+    // 找"最短的那批横线"作为候选（图签格线通常比图框边框短）
+    final cand = hs.where((h) => h.x0 >= rightHalf - width * 0.05).toList();
+    if (cand.length < 4) return null;
+
+    // 从候选里找 4~6 条间距一致的连续组
+    ({List<double> ys, double x0, double x1})? best;
+    var bestScore = double.infinity;
+
+    for (var start = 0; start < cand.length; start++) {
+      final group = <({double y, double x0, double x1})>[cand[start]];
+      for (var k = start + 1; k < cand.length; k++) {
+        final prev = group.last;
+        final d = prev.y - cand[k].y;
+        if (d <= 0.05) continue; // 同一条线的重复
+        if (d > 20) break; // 跨度太大，不是同一组格线
+        group.add(cand[k]);
+        if (group.length > 6) break;
+      }
+      if (group.length < 4) continue;
+
+      // 间距一致性：标准差越小越好
+      final gaps = <double>[
+        for (var i = 1; i < group.length; i++) group[i - 1].y - group[i].y
+      ];
+      final mean = gaps.reduce((a, b) => a + b) / gaps.length;
+      if (mean < 1.0 || mean > 15) continue;
+      var varSum = 0.0;
+      for (final g in gaps) {
+        varSum += (g - mean) * (g - mean);
+      }
+      final sd = math.sqrt(varSum / gaps.length);
+      if (sd / mean > 0.15) continue; // 间距不齐，不是图签
+
+      if (sd < bestScore) {
+        bestScore = sd;
+        best = (
+          ys: [for (final g in group) g.y],
+          x0: group.map((g) => g.x0).reduce(math.min),
+          x1: group.map((g) => g.x1).reduce(math.max),
+        );
+      }
+    }
+    return best;
+  }
+
   /// 给定内容尺寸，算需要几行几列图框。
   ({int cols, int rows}) tilesFor(double contentW, double contentH) {
     final cols = math.max(1, (contentW / contentWidth).ceil());

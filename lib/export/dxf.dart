@@ -695,9 +695,12 @@ class DxfExporter {
     //
     // 先把图框里写死的示例工程名换成用户的工程名（v3.20）。
     final frame2 = frame?.replaceProjectName(name);
+    // 图框绘制偏移（用于把图签文字画到正确位置）
+    final frameOrigin = <double>[0, 0];
     final frameUsed = _appendUserFrameOrFallback(c, frame2,
         extMinX, extMinY, extMaxX, extMaxY, routeMinX, routeMinY,
-        routeMaxX, routeMaxY);
+        routeMaxX, routeMaxY,
+        originOut: frameOrigin);
     if (!frameUsed) {
       _appendFrame(c, extMinX, extMinY, extMaxX, extMaxY);
     }
@@ -716,7 +719,10 @@ class DxfExporter {
         _fillFrameTitleCells(c, frame2!, name: name,
             totalPoints: labels.length,
             totalLength: routeTotalLen,
-            scale: routeScale);
+            scale: routeScale,
+            // 图框实际绘制偏移：文字必须跟着平移，否则画到框外
+            originDx: frameOrigin[0],
+            originDy: frameOrigin[1]);
       } else {
         _appendTitleBlock(c, extMinX, extMinY, extMaxX, extMaxY,
             name: name,
@@ -786,7 +792,8 @@ class DxfExporter {
       bool style = true,
       String? styleName,
       bool centered = false,
-      bool liftAboveLine = false}) {
+      bool liftAboveLine = false,
+      bool vCenterExact = false}) {
     // **DXF 文字净化（关键防线）**
     //
     // 组码 1 是单行文本值：里面出现裸的 `\`、`{`、`}` 会让 CAD 解析失败，
@@ -827,20 +834,37 @@ class DxfExporter {
     //     让标注**明显浮在线条上方**，避免与线重叠、看着乱。
     //
     // 0.35 的来历：宋体汉字字身约占 em 的 0.86，基线到字身中心 ≈0.35em。
-    final yAdj = centered ? y - h * 0.35 + h * (liftAboveLine ? 0.95 : 0) : y;
+    //
+    // [vCenterExact]：**表格式精确居中**（v3.21）。
+    // 图签要落在格子的几何正中，不能再叠 0.35h 的基线补偿 ——
+    // 那个补偿是给"压在线条上"的标注用的。图签用它会整体下沉
+    // 1.0~1.6 个单位，正是用户说的"字老错行，没在表格内"。
+    final yAdj = (centered && !vCenterExact)
+        ? y - h * 0.35 + h * (liftAboveLine ? 0.95 : 0)
+        : y;
 
     c.ent('TEXT', layer, 'AcDbText');
     if (sn != null) c.sb.write('7\n$sn\n');
     c.sb.write(
         '10\n${_fmt(x)}\n20\n${_fmt(yAdj)}\n30\n0\n40\n${_fmt(h)}\n');
     if (angle != null) c.sb.write('50\n${angle.toStringAsFixed(1)}\n');
+
+    // **文本值必须先写**（v3.21 修）。
+    //
+    // 原来顺序是 `72\n1\n` → `11\n<对齐点x>` → `1\n<文本>`。
+    // 这样组码 `72` 的值 `1` 与下一个组码 `11` 紧邻，实际字节是：
+    //     72\n1\n11\n28.963\n...
+    // 部分解析器（含我们自己的测试正则）会把 `1\n1` 连读成组码 `11`，
+    // 于是文本被解析成 "11" —— 用户看到的就是图签里全是 `11`。
+    //
+    // DXF 组码本来就无序要求，把 `1\n<文本>` 提到前面即可消除歧义。
+    c.sb.write('1\n$t\n');
     if (centered) {
       // 只给水平居中（72=1），对齐点与插入点一致。
       // 不写 73：避免各 CAD 对"垂直居中"理解不一致导致偏移。
       c.sb.write('72\n1\n');
       c.sb.write('11\n${_fmt(x)}\n21\n${_fmt(yAdj)}\n31\n0\n');
     }
-    c.sb.write('1\n$t\n');
     if (c.r2000) c.sb.write('100\nAcDbText\n');
   }
 
@@ -1151,7 +1175,8 @@ class DxfExporter {
   /// 打印出来就不合规了。宁可多出几张。
   static bool _appendUserFrameOrFallback(_Ctx c, FrameTemplate? frame,
       double minX, double minY, double maxX, double maxY,
-      double routeMinX, double routeMinY, double routeMaxX, double routeMaxY) {
+      double routeMinX, double routeMinY, double routeMaxX, double routeMaxY,
+      {List<double>? originOut}) {
     if (frame == null || frame.shapes.isEmpty) return false;
 
     final cw = frame.contentWidth;
@@ -1190,6 +1215,10 @@ class DxfExporter {
 
 
     // 单张时按线路居中；多张时按线路左下角平铺（见下）。
+    //
+    // 记下**第一张图框的绘制偏移**：填图签文字时必须加上它，
+    // 否则文字会按图框内坐标（0~30）画到图框外面去（v3.21 修）。
+    double originDx = 0, originDy = 0;
 
     if (cols == 1 && rows == 1) {
       // 单张：图框**按杆路居中**（不是按含底图的总包围盒）。
@@ -1198,11 +1227,15 @@ class DxfExporter {
       final cyRoute = (routeMinY + routeMaxY) / 2;
       final dx = cxRoute - frame.width / 2;
       final dy = cyRoute - frame.height / 2;
+      originDx = dx;
+      originDy = dy;
       _emitFrameShapes(c, frame, dx, dy);
     } else {
       // 多张：以**线路**左下角为起点按网格平铺，保证每一段杆路都落在某张图框里。
       final oX = routeMinX - frame.contentInset;
       final oY = routeMinY - frame.contentInset;
+      originDx = oX;
+      originDy = oY;
       for (var r = 0; r < rows; r++) {
         for (var k = 0; k < cols; k++) {
           final dx = oX + k * cw;
@@ -1210,6 +1243,11 @@ class DxfExporter {
           _emitFrameShapes(c, frame, dx, dy);
         }
       }
+    }
+    // 回传第一张图框的绘制偏移（填图签文字用）
+    if (originOut != null && originOut.length >= 2) {
+      originOut[0] = originDx;
+      originOut[1] = originDy;
     }
     return true;
   }
@@ -1485,31 +1523,53 @@ class DxfExporter {
       {required String name,
       required int totalPoints,
       required double totalLength,
-      required int scale}) {
-    // 图签区：右下角，宽约 45%、高约 30 单位的条带（从图框底边起算）。
-    const tbH = 30.0;
-    final tbW = frame.width * 0.46;
-    final x0 = frame.width - tbW; // 图签左边线（图框内坐标）
-    final y0 = 0.0; // 图框底边
+      required int scale,
+      double originDx = 0,
+      double originDy = 0}) {
+    // **优先用实测格线**（v3.21）：从图框里扫出图签那组等距横线，
+    // 按它的真实格高与格中心填字。这修掉了"字掉在格子下沿"的问题 ——
+    // 之前按凭空估的 30/46% 算，与真实格线差 1~1.6 个单位。
+    final measured = frame.findTitleBlockRows();
 
-    // 5 行，与图框格线一致
-    const rows = 5;
-    final rowH = tbH / rows;
+    final List<double> rowYs;
+    final double x0;
+    if (measured != null && measured.ys.length >= 4) {
+      rowYs = measured.ys; // 已按 y 降序，格数 = 线数-1
+      x0 = measured.x0;
+    } else {
+      // 回退：按 30 单位高、46% 宽估算（旧行为）
+      const tbH = 30.0;
+      final tbW = frame.width * 0.46;
+      x0 = frame.width - tbW;
+      rowYs = [
+        for (var i = 0; i <= 5; i++) tbH - tbH / 5 * i,
+      ];
+    }
+
+    final cells = rowYs.length - 1; // 格数
     final date = DateTime.now();
     final vals = <String>[
       (name.isEmpty ? '未命名项目' : name),
-      '滑洲云图  $date'.replaceAll(RegExp(r'\s+'), ' '),
+      '滑洲云图 ${date.year}-${date.month.toString().padLeft(2, '0')}'
+          '-${date.day.toString().padLeft(2, '0')}',
       '点数 $totalPoints',
       '长度 ${_formatDistNoUnit(totalLength)}m',
       '1:$scale',
     ];
 
-    // 字高：不超格高 62%，与图框里已有文字（2.36~3.54）协调
-    final fontH = math.min(2.6, rowH * 0.55);
-    for (var i = 0; i < rows; i++) {
-      // 行 i 的垂直中心（自底部起算）
-      final cy = y0 + rowH * i + rowH / 2;
-      _text(c, 'TuQian', x0 + 2.0, cy, fontH, vals[i], centered: true);
+    // 往最左一列的**空白格**里写字（图框右侧已有公司名/图号，不能覆盖）。
+    // 从上往下填，最多填 min(格数, 5) 行。
+    final n = math.min(cells, vals.length);
+    for (var i = 0; i < n; i++) {
+      final top = rowYs[i];
+      final bot = rowYs[i + 1];
+      final cy = (top + bot) / 2; // 该格**真实**垂直中心
+      final rowH = top - bot;
+      final fontH = math.min(2.6, rowH * 0.52);
+      // **加上图框绘制偏移**：measured/cells 都是图框内坐标（0~30），
+      // 图框实际画在 dx,dy 处，文字不跟着平移就会落到框外。
+      _text(c, 'TuQian', originDx + x0 + 2.0, originDy + cy, fontH, vals[i],
+          centered: true, vCenterExact: true);
     }
   }
 
@@ -1554,7 +1614,8 @@ class DxfExporter {
     final fontH = math.min(3.2, rowH * 0.62); // 字高不超格高，避免压线
     for (var i = 0; i < rows.length; i++) {
       final cy = y0 + rowH * i + rowH / 2; // 该行垂直中心
-      _text(c, 'TuQian', x0 + 2, cy, fontH, rows[i], centered: true);
+      _text(c, 'TuQian', x0 + 2, cy, fontH, rows[i],
+          centered: true, vCenterExact: true);
     }
   }
 
