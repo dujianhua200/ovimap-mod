@@ -695,6 +695,9 @@ class DxfExporter {
     //
     // 先把图框里写死的示例工程名换成用户的工程名（v3.20）。
     final frame2 = frame?.replaceProjectName(name);
+    // 缓存图框格线，供 _snapTextToCell 把文字吸附到格子中心（v3.23）
+    final measuredRows = frame2?.findTitleBlockRows();
+    _frameRowCache = measuredRows?.ys ?? const [];
     // 图框绘制偏移（用于把图签文字画到正确位置）
     final frameOrigin = <double>[0, 0];
     final frameUsed = _appendUserFrameOrFallback(c, frame2,
@@ -707,7 +710,14 @@ class DxfExporter {
     if (showLegend) {
       _appendLegend(c, labels, extMinX, extMinY);
     }
-    if (showNorthArrow) _appendNorthArrow(c, extMaxX, extMaxY);
+    // **有用户图框时不再另画指北针**（v3.23）。
+    //
+    // 用户图框（新块.dxf）自带指北针：圆 + N 字 + 三角，已经在图框里排好。
+    // 我们再画一个，就变成两套图框里各有一个"额外的 N"，与图框自带的
+    // 那个重叠/错位 —— 用户截图里看到的两个 N 就是这个。
+    if (showNorthArrow && !frameUsed) {
+      _appendNorthArrow(c, extMaxX, extMaxY);
+    }
     if (showTitleBlock) {
       if (frameUsed) {
         // **有用户图框时，往图框自带的图签格子里填字**，不再另画一个（v3.20）。
@@ -1231,15 +1241,23 @@ class DxfExporter {
       originDy = dy;
       _emitFrameShapes(c, frame, dx, dy);
     } else {
-      // 多张：以**线路**左下角为起点按网格平铺，保证每一段杆路都落在某张图框里。
+      // 多张：以**线路**左下角为起点按网格平铺。
+      //
+      // **步长必须用图框实际尺寸**（v3.23 修"图框重叠"）。
+      // 原来用 `cw`（contentWidth = 368.5）当步长，而图框实际宽 392 ——
+      // 相邻两张重叠 23.5 个单位，用户看到的就是"两套图框叠在一起"。
+      // 现在步长 = 图框宽/高 + 间隙，保证既不重叠也不留过大空档。
+      const gap = 12.0; // 两张图框之间留 12 个单位，打印后便于裁切
+      final stepX = frame.width + gap;
+      final stepY = frame.height + gap;
       final oX = routeMinX - frame.contentInset;
       final oY = routeMinY - frame.contentInset;
       originDx = oX;
       originDy = oY;
       for (var r = 0; r < rows; r++) {
         for (var k = 0; k < cols; k++) {
-          final dx = oX + k * cw;
-          final dy = oY + r * ch;
+          final dx = oX + k * stepX;
+          final dy = oY + r * stepY;
           _emitFrameShapes(c, frame, dx, dy);
         }
       }
@@ -1270,11 +1288,53 @@ class DxfExporter {
         case FrameText t:
           final txt = t.text.trim();
           if (txt.isEmpty) break;
-          _text(c, 'TuQian', t.x + dx, t.y + dy, t.h <= 0 ? 2.5 : t.h,
+          // **把图框自带文字吸附到所在格的垂直中心**（v3.23）。
+          //
+          // 用户图框里的文字（"审核""专业负责人""中国通信建设…"）是按
+          // **基线**定位的，直接照搬会整体偏上 1.6~2.3 个单位 ——
+          // CAD 里看就是"字没落在表格里"。
+          //
+          // 实测原始图框：'新县福星园三期' 偏上 +2.26、
+          // '中国通信建设…' 偏上 +1.57、'01' 偏下 -1.26。
+          // 这里统一改成"落在所在格的几何中心"。
+          final cy = _snapTextToCell(t.y, t.h);
+          _text(c, 'TuQian', t.x + dx, cy + dy, t.h <= 0 ? 2.5 : t.h,
               txt, angle: t.rot, style: true);
       }
     }
   }
+
+  /// 把图框文字的 y 吸附到**所在格的垂直中心**（v3.23）。
+  ///
+  /// ## 为什么需要
+  /// 用户图框（新块.dxf）里的文字是按**基线**定位的：
+  /// 实测 '新县福星园三期' 比格中心高 +2.26、'01' 低 -1.26。
+  /// 在 AutoCAD 里原图看着正常（它有正确的文字样式与基线），
+  /// 但我们按"插入点 = 基线"重画后，字就顶到格子上沿甚至压线。
+  ///
+  /// ## 做法
+  /// 找出该 y 落在哪两条水平格线之间，返回该格的垂直中心。
+  /// 找不到格线（比如标题区、指北针的 N）就原样返回，不乱动。
+  static double _snapTextToCell(double y, double h) {
+    // 图框格线（与 assets/frames/frame_a3.dxf 实测一致）
+    // 用静态缓存避免每次重算
+    final rows = _frameRowCache;
+    if (rows.length < 2) return y;
+    for (var i = 0; i < rows.length - 1; i++) {
+      final top = rows[i], bot = rows[i + 1];
+      // 允许 ±h 的容差（文字基线本来就不在中心）
+      if (y >= bot - h && y <= top + h) {
+        return (top + bot) / 2;
+      }
+    }
+    return y;
+  }
+
+  /// 图框水平格线缓存（y 从高到低）。
+  ///
+  /// 由 [FrameTemplate.findTitleBlockRows] 在导出开始时填充；
+  /// 为空时 [_snapTextToCell] 原样返回，不影响无图框场景。
+  static List<double> _frameRowCache = const [];
 
   /// 把任意文字净化成可安全写进 DXF `组码 1` 的形式。
   ///
