@@ -127,30 +127,46 @@ void main() {
         // 由于整体有平移，先算出该图框的偏移基准
         continue;
       }
-      // 改为直接验证：所有图签文字的相邻行距都等于 cellH（不串格）
-      final ys = texts.where((e) => e.t.trim() != 'N').map((e) => e.y).toList()
+      // 只验证**图框自带**的固定文字（这些是原本错位的），
+      // 不含我们自己填的统计行（它们走 _fillFrameTitleCells，位置另算）。
+      const builtinMarks = ['审', '部门主管', '总负责人', '专业负责人', '图号'];
+      final builtin = texts
+          .where((e) => builtinMarks.any((m) => e.t.contains(m)))
+          .map((e) => e.y)
+          .toList()
         ..sort((a, b) => b.compareTo(a));
-      // ignore: avoid_print
-      print('图签文字 y: ${ys.map((v) => v.toStringAsFixed(2)).toList()}');
 
-      // 去重后计算相邻差
       final uniq = <double>[];
-      for (final y in ys) {
+      for (final y in builtin) {
         if (uniq.isEmpty || (uniq.last - y).abs() > 0.3) uniq.add(y);
       }
+      // ignore: avoid_print
+      print('图框自带文字的唯一 y 值: '
+          '${uniq.map((v) => v.toStringAsFixed(2)).toList()}');
+
+      expect(uniq.length, greaterThanOrEqualTo(4),
+          reason: '应有至少 4 行图框自带文字');
+
       final gaps = <double>[
         for (var i = 1; i < uniq.length; i++) uniq[i - 1] - uniq[i]
       ];
       // ignore: avoid_print
-      print('相邻行距: ${gaps.map((v) => v.toStringAsFixed(2)).toList()}');
+      print('行距: ${gaps.map((v) => v.toStringAsFixed(2)).toList()}');
       for (final g in gaps) {
-        if ((g - cellH).abs() > 0.15) {
-          bad++;
-        }
+        expect((g - cellH).abs(), lessThan(0.15),
+            reason: '每行应落在格中心（行距 == 格高 $cellH），实际 $gaps');
       }
-      expect(bad, 0,
-          reason: '每行应落在各自的格中心（行距 == 格高 $cellH），'
-              '有 $bad 处偏差过大：$gaps');
+
+      // 关键：同一格的文字必须共线（y 完全相同）
+      final byY = <String, List<String>>{};
+      for (final e in texts
+          .where((e) => builtinMarks.any((m) => e.t.contains(m)))) {
+        byY.putIfAbsent(e.y.toStringAsFixed(2), () => []).add(e.t.trim());
+      }
+      // ignore: avoid_print
+      print('按 y 分组: $byY');
+      expect(byY.length, uniq.length,
+          reason: '同格文字应完全共线');
     });
   });
 }

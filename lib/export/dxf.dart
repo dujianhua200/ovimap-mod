@@ -695,9 +695,6 @@ class DxfExporter {
     //
     // 先把图框里写死的示例工程名换成用户的工程名（v3.20）。
     final frame2 = frame?.replaceProjectName(name);
-    // 缓存图框格线，供 _snapTextToCell 把文字吸附到格子中心（v3.23）
-    final measuredRows = frame2?.findTitleBlockRows();
-    _frameRowCache = measuredRows?.ys ?? const [];
     // 图框绘制偏移（用于把图签文字画到正确位置）
     final frameOrigin = <double>[0, 0];
     final frameUsed = _appendUserFrameOrFallback(c, frame2,
@@ -1293,79 +1290,76 @@ class DxfExporter {
         case FrameText t:
           final txt = t.text.trim();
           if (txt.isEmpty) break;
-          // **把图框自带文字吸附到所在格的垂直中心**（v3.23）。
+          // **把图框自带文字吸附到所在格的垂直中心**（v3.23~3.25）。
           //
-          // 用户图框里的文字（"审核""专业负责人""中国通信建设…"）是按
-          // **基线**定位的，直接照搬会整体偏上 1.6~2.3 个单位 ——
-          // CAD 里看就是"字没落在表格里"。
-          //
-          // 实测原始图框：'新县福星园三期' 偏上 +2.26、
-          // '中国通信建设…' 偏上 +1.57、'01' 偏下 -1.26。
-          // 这里统一改成"落在所在格的几何中心"。
-          final cy = _snapTextToCell(t.y, t.h);
-          _text(c, 'TuQian', t.x + dx, cy + dy, t.h <= 0 ? 2.5 : t.h,
+          // 关键：用**图框自身**的格线吸附，不用全局缓存 ——
+          // 多幅图框时各幅的图签位置不同，全局缓存会让第二幅起全部错位。
+          final cy = _snapTextToCellIn(frame, t.y, t.h);
+          // 用户口径："往下方移动一点点，往左边一点点"。
+          // ⚠️ 必须用**固定偏移**：图框里各行字高不同（2.36~3.54），
+          // 按字高比例移会让每行位移不等，行距被打乱。
+          const nudgeDown = 0.9; // 固定下移（图纸单位）
+          const nudgeLeft = 1.2; // 固定左移
+          final hh = t.h <= 0 ? 2.5 : t.h;
+          _text(c, 'TuQian', t.x + dx - nudgeLeft, cy - nudgeDown + dy, hh,
               txt, angle: t.rot, style: true);
       }
     }
   }
 
-  /// 把图框文字的 y 吸附到**所在格的垂直中心**（v3.23）。
-  ///
-  /// ## 为什么需要
-  /// 用户图框（新块.dxf）里的文字是按**基线**定位的：
-  /// 实测 '新县福星园三期' 比格中心高 +2.26、'01' 低 -1.26。
-  /// 在 AutoCAD 里原图看着正常（它有正确的文字样式与基线），
-  /// 但我们按"插入点 = 基线"重画后，字就顶到格子上沿甚至压线。
-  ///
-  /// ## 做法
-  /// 找出该 y 落在哪两条水平格线之间，返回该格的垂直中心。
-  /// 找不到格线（比如标题区、指北针的 N）就原样返回，不乱动。
-  static double _snapTextToCell(double y, double h) {
-    // 图框格线（与 assets/frames/frame_a3.dxf 实测一致）
-    // 用静态缓存避免每次重算
-    final rows = _frameRowCache;
-    if (rows.length < 2) return y;
 
-    // **取最近的格中心**（v3.24 修）。
-    //
-    // 旧实现从下往上扫，条件是 `y >= bot-h && y <= top+h` —— 容差 ±h
-    // 让文字很容易先命中**上一格**，于是吸附方向错一整格：
-    // 实测"审核" 在 -75.23（本该落在 -75.23 这格），却被吸到 -69.34。
-    //
-    // 改为遍历所有格中心，取 |y - center| 最小的那个，语义明确、不会串格。
+
+  /// 用**指定图框自身**的格线，把文字 y 吸附到最近格中心（v3.25）。
+  ///
+  /// ## 为什么不用全局缓存
+  /// 用户文件里有多幅图框（2×2），每幅的图签位置都不同。
+  /// 之前用静态 `_frameRowCache`，第二幅起全部错位 ——
+  /// 实测行距变成 0.90/5.00 交替（同一格的文字被吸到不同格）。
+  ///
+  /// 这里改成每次从 [frame] 的形状里扫格线，与其它图框完全隔离。
+  static double _snapTextToCellIn(FrameTemplate frame, double y, double h) {
+    // 收集该图框里的水平线（图签格线）
+    final hs = <double>[];
+    for (final s in frame.shapes) {
+      if (s is FrameLine && (s.y1 - s.y2).abs() < 0.01) {
+        hs.add((s.y1 + s.y2) / 2);
+      }
+    }
+    if (hs.length < 4) return y;
+    hs.sort((a, b) => b.compareTo(a));
+
+    // 去重（图框里常有重复线段）
+    final rows = <double>[];
+    for (final v in hs) {
+      if (rows.isEmpty || (rows.last - v).abs() > 0.05) rows.add(v);
+    }
+    if (rows.length < 4) return y;
+
     var bestCenter = y;
     var bestD = double.infinity;
     for (var i = 0; i < rows.length - 1; i++) {
       final top = rows[i], bot = rows[i + 1];
+      final gap = top - bot;
+      // 只考虑"格子尺度"的间距（图签格高约 5.9；排除整块大区间的分隔线）
+      if (gap < 2.5 || gap > 12) continue;
       final c = (top + bot) / 2;
+      // **优先用"包住该文字"的格**：文字 y 落在 [bot-ε, top+ε] 内时，
+      // 直接取该格中心 —— 比"找最近中心"更符合表格语义，
+      // 也避免同一格内的多条文字被吸到不同格。
+      const eps = 1.2;
+      if (y >= bot - eps && y <= top + eps) {
+        return c;
+      }
       final d = (y - c).abs();
       if (d < bestD) {
         bestD = d;
         bestCenter = c;
       }
     }
-    // 只吸附"确实属于某个格子"的文字：距离超过一格高就不动
-    // （避免把指北针的 N、标题区大字吸到图签里）
-    final maxCellH = _maxRowGap(rows);
-    if (bestD > maxCellH) return y;
+    // 不在任何格内且离所有中心都远 → 不动（保护指北针 N 等）
+    if (bestD > 6.0) return y;
     return bestCenter;
   }
-
-  /// 相邻格高的最大值（用于判断文字是否属于图签区域）。
-  static double _maxRowGap(List<double> rows) {
-    var m = 0.0;
-    for (var i = 1; i < rows.length; i++) {
-      final d = (rows[i - 1] - rows[i]).abs();
-      if (d > m) m = d;
-    }
-    return m;
-  }
-
-  /// 图框水平格线缓存（y 从高到低）。
-  ///
-  /// 由 [FrameTemplate.findTitleBlockRows] 在导出开始时填充；
-  /// 为空时 [_snapTextToCell] 原样返回，不影响无图框场景。
-  static List<double> _frameRowCache = const [];
 
   /// 把任意文字净化成可安全写进 DXF `组码 1` 的形式。
   ///
@@ -1544,6 +1538,79 @@ class DxfExporter {
 
   /// 图签：右下角矩形分格（约 120m × 30m），设计院图纸角标习惯。
   /// 内容：工程名 / 滑洲云图导出 / 导出日期 / 总点数·总长度 / A3 自动比例。
+  /// 把一条折线按"是否在路线缓冲区"切成若干连续段（v3.25）。
+  ///
+  /// ## 为什么必须按段切
+  /// 用户反馈"道路太长，没切掉外面的"。旧实现只要折线上**任一点**
+  /// 在缓冲内就保留整条 —— 一条跨 14 公里的省道只要擦过线路边，整条进图。
+  ///
+  /// ## 算法
+  /// 逐线段判断两端点是否在缓冲内：
+  ///  · 两端都在 → 并入当前段；
+  ///  · 一端在内 → 做**线性插值截断**（二分找边界点），把交叉处收口；
+  ///  · 两端都在外 → 断开当前段。
+  ///
+  /// 这样图面上只留下"贴着杆路那一截"，其余全部丢弃。
+  static List<List<List<double>>> _splitByRouteBuffer(
+      List<List<double>> pts, bool Function(double lat, double lon) near) {
+    if (pts.length < 2) return const [];
+
+    final out = <List<List<double>>>[];
+    var cur = <List<double>>[];
+
+    void flush() {
+      if (cur.length >= 2) out.add(cur);
+      cur = <List<double>>[];
+    }
+
+    // 二分找边界点：从 inLat/inLon（在内）到 outLat/outLon（在外）之间
+    List<double> crossing(double inLat, double inLon, double outLat,
+        double outLon) {
+      var lo = 0.0, hi = 1.0; // t=0 在内，t=1 在外
+      for (var i = 0; i < 12; i++) {
+        final mid = (lo + hi) / 2;
+        final la = inLat + (outLat - inLat) * mid;
+        final lo2 = inLon + (outLon - inLon) * mid;
+        if (near(la, lo2)) {
+          lo = mid;
+        } else {
+          hi = mid;
+        }
+      }
+      return [
+        inLat + (outLat - inLat) * lo,
+        inLon + (outLon - inLon) * lo,
+      ];
+    }
+
+    for (var i = 1; i < pts.length; i++) {
+      final a = pts[i - 1], b = pts[i];
+      final aIn = near(a[0], a[1]);
+      final bIn = near(b[0], b[1]);
+
+      if (aIn && bIn) {
+        // 整段在内
+        if (cur.isEmpty) cur.add([a[0], a[1]]);
+        cur.add([b[0], b[1]]);
+      } else if (aIn && !bIn) {
+        // 从内到外：写到最后交点
+        if (cur.isEmpty) cur.add([a[0], a[1]]);
+        cur.add(crossing(a[0], a[1], b[0], b[1]));
+        flush();
+      } else if (!aIn && bIn) {
+        // 从外到内：从交点开始新段
+        flush();
+        cur.add(crossing(b[0], b[1], a[0], a[1]));
+        cur.add([b[0], b[1]]);
+      } else {
+        // 两端都在外：断开
+        flush();
+      }
+    }
+    flush();
+    return out;
+  }
+
   /// 按**沿线路缓冲**再裁一次底图（v3.20）。
   ///
   /// ## 为什么需要第二刀
@@ -1564,7 +1631,17 @@ class DxfExporter {
 
     final roads = <RoadPoly>[];
     for (final r in bm.roads) {
-      if (r.pts.any((p) => near(p[0], p[1]))) roads.add(r);
+      // **按缓冲逐段裁剪**（v3.25 修"道路太长"）。
+      //
+      // 旧写法 `r.pts.any(near)` 是"任一点在缓冲内就保留**整条**" ——
+      // 一条横贯几十公里的省道只要擦过线路附近，整条都会进图。
+      // 实测用户文件：一条 10882 单位的道路（跨 14 公里）被完整导出，
+      // 而线路本身只有 565×364 单位。
+      //
+      // 现在把折线切成"在缓冲内 / 在缓冲外"的连续段，**只保留在内的段**。
+      for (final seg in _splitByRouteBuffer(r.pts, near)) {
+        if (seg.length >= 2) roads.add(RoadPoly(seg, r.grade, r.name));
+      }
     }
     final buildings = <BuildingPoly>[];
     for (final b in bm.buildings) {
