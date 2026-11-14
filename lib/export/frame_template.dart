@@ -201,35 +201,68 @@ class FrameTemplate {
   }
 }
 
-/// 加载内置图框（assets/frames/frame_a3.dxf）。
+/// 可选图框规格（用户口径："弄个选择，比如选择 A3 或者 A4"）。
+enum FrameSize {
+  /// 原图框（用户自己画的 A3 内框，392×281）。
+  legacy('新块（A3 内框）', 'assets/frames/frame_a3.dxf', 392, 281),
+
+  /// 标准 A3 图框（从 A4模板.dxf 提取，420×297）。
+  a3('A3 标准图框', 'assets/frames/frame_tk_a3.dxf', 420, 297),
+
+  /// 标准 A4 图框（从 A4模板.dxf 提取，297×210）。
+  a4('A4 标准图框', 'assets/frames/frame_tk_a4.dxf', 297, 210);
+
+  const FrameSize(this.label, this.asset, this.widthMm, this.heightMm);
+
+  final String label;
+  final String asset;
+  final double widthMm;
+  final double heightMm;
+
+  /// 宽高比（供 UI 画小预览用）。
+  double get aspect => widthMm / heightMm;
+}
+
+/// 加载内置图框。
+///
+/// 支持多套图框（A3/A4/原图框），按 [FrameSize] 选择；
+/// 每套单独缓存，切换时不重复解析。
 class FrameLibrary {
   FrameLibrary._();
-  static FrameTemplate? _cached;
+  static final Map<FrameSize, FrameTemplate> _cache = {};
   static bool enabled = true;
 
-  /// 内置图框资源路径（替换图框 = 换这个文件）。
-  static const String assetPath = 'assets/frames/frame_a3.dxf';
+  /// 默认图框规格（与旧行为一致：用户画的 A3 内框）。
+  static FrameSize defaultSize = FrameSize.legacy;
 
-  static Future<FrameTemplate?> load() async {
+  static Future<FrameTemplate?> load([FrameSize? size]) async {
     if (!enabled) return null;
-    final c = _cached;
+    final s = size ?? defaultSize;
+    final c = _cache[s];
     if (c != null) return c;
     try {
-      final raw = await rootBundle.load(assetPath);
+      final raw = await rootBundle.load(s.asset);
       final bytes = raw.buffer.asUint8List();
       // AS-IS 文本：图框 DXF 的 `$DWGCODEPAGE = ANSI_936`（中文 GBK）。
       // 解析只用 ASCII 组码/数值，中文按 GBK 还原（见 _decodeDxfText）。
       final text = latin1.decode(bytes);
       final t = parseDxfFrame(text);
-      _cached = t;
+      _cache[s] = t;
       return t;
     } catch (_) {
       return null;
     }
   }
 
-  static void setForTest(FrameTemplate? t) => _cached = t;
-  static void resetForTest() => _cached = null;
+  static void setForTest(FrameTemplate? t, [FrameSize? size]) {
+    if (t == null) {
+      _cache.remove(size ?? defaultSize);
+    } else {
+      _cache[size ?? defaultSize] = t;
+    }
+  }
+
+  static void resetForTest() => _cache.clear();
 }
 
 /// 清理 MTEXT 的富文本控制码，只留可读文字。
@@ -329,6 +362,10 @@ FrameTemplate parseDxfFrame(String text) {
 
   // 收集 BLOCKS 段里每个块的实体
   final blocks = <String, List<FrameShape>>{};
+  // **同时收集 ENTITIES 段**（v3.26）：
+  // ezdxf 提取出的图框把实体放在 modelspace 里，不在 BLOCKS。
+  // 两种来源都要支持，否则新图框会解析成空。
+  final entities = <FrameShape>[];
   var i = 0;
   while (i < pairs.length) {
     if (pairs[i][0] == '0' && pairs[i][1].trim() == 'SECTION') {
@@ -339,14 +376,22 @@ FrameTemplate parseDxfFrame(String text) {
         i = _parseBlocks(pairs, i + 2, blocks);
         continue;
       }
+      if (secName == 'ENTITIES') {
+        i = _parseEntities(pairs, i + 2, entities);
+        continue;
+      }
     }
     i++;
   }
 
-  // 取"被 modelspace 引用"的那个块（用户的图框是一个 INSERT）
+  // modelspace 里有实体 → 直接用它（新提取的 A3/A4 图框走这条）
+  if (entities.isNotEmpty) {
+    return _normalize(entities);
+  }
+
+  // 否则取 BLOCKS 里"含最多几何"的块（用户手画图框走这条）
   String? rootName;
   for (final e in blocks.entries) {
-    // 找含最多几何的块当根（嵌套时外层只有一个 INSERT）
     if (e.value.isNotEmpty) {
       rootName ??= e.key;
     }
@@ -359,6 +404,12 @@ FrameTemplate parseDxfFrame(String text) {
   final flat = <FrameShape>[];
   _flatten(rootName, blocks, 0, 0, flat, <String>{});
 
+  if (flat.isEmpty) return const FrameTemplate([], 420, 297);
+  return _normalize(flat);
+}
+
+/// 把一组图元归一化：整体平移到左下角在原点，返回 [FrameTemplate]。
+FrameTemplate _normalize(List<FrameShape> flat) {
   if (flat.isEmpty) return const FrameTemplate([], 420, 297);
 
   // 归一化：整体平移到左下角在原点
@@ -388,6 +439,10 @@ FrameTemplate parseDxfFrame(String text) {
     }
   }
 
+  if (!minX.isFinite || !minY.isFinite) {
+    return const FrameTemplate([], 420, 297);
+  }
+
   final dx = -minX, dy = -minY;
   final out = <FrameShape>[];
   for (final s in flat) {
@@ -406,6 +461,63 @@ FrameTemplate parseDxfFrame(String text) {
   }
 
   return FrameTemplate(out, maxX - minX, maxY - minY);
+}
+
+/// 解析 ENTITIES 段（modelspace）里的图元，直接追加到 [out]。
+///
+/// 与 [_parseBlocks] 的区别：这里没有"块"的概念，遇到 ENDSEC 就结束。
+int _parseEntities(
+    List<List<String>> pairs, int start, List<FrameShape> out) {
+  var i = start;
+  var entType = '';
+  var ent = <String, String>{};
+  final lwVertices = <List<double>>[];
+  double? pendingX;
+
+  void flushEnt() {
+    if (entType.isEmpty) {
+      ent = {};
+      lwVertices.clear();
+      pendingX = null;
+      return;
+    }
+    final s = _shapeFromEntity(entType, ent, lwVertices);
+    if (s != null) out.add(s);
+    entType = '';
+    ent = {};
+    lwVertices.clear();
+    pendingX = null;
+  }
+
+  while (i < pairs.length) {
+    final code = pairs[i][0];
+    final value = pairs[i][1];
+    if (code == '0') {
+      final v = value.trim();
+      if (v == 'ENDSEC') {
+        flushEnt();
+        return i + 1;
+      }
+      flushEnt();
+      entType = v;
+      i++;
+      continue;
+    }
+    if (entType.isNotEmpty) {
+      ent[code] = value.trim();
+      if (entType == 'LWPOLYLINE') {
+        if (code == '10') {
+          pendingX = double.tryParse(value.trim());
+        } else if (code == '20' && pendingX != null) {
+          lwVertices.add([pendingX!, double.tryParse(value.trim()) ?? 0]);
+          pendingX = null;
+        }
+      }
+    }
+    i++;
+  }
+  flushEnt();
+  return i;
 }
 
 int _parseBlocks(List<List<String>> pairs, int start,

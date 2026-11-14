@@ -1062,6 +1062,11 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
 
   // —— 图框（用户 DXF，原样搬用，尺寸不变）——
   var useFrame = opt('dxfUseFrame', true);
+  // 图框规格（用户口径："弄个选择，比如选择 A3 或者 A4"）
+  var frameSize = FrameSize.values.firstWhere(
+    (s) => s.name == (prefs.getString('dxfFrameSize') ?? ''),
+    orElse: () => FrameLibrary.defaultSize,
+  );
 
   // —— 出图颜色（用户口径："标签的颜色实现可选，现在只有黑色"）——
   // 值为 0xRRGGBB，0 = 用图层默认色。三个常用项：符号/距离/杆路。
@@ -1313,12 +1318,51 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
           CheckboxListTile(
             dense: true,
             contentPadding: EdgeInsets.zero,
-            title: const Text('使用我的图框（新块.dxf，尺寸不变，装不下自动分幅）',
+            title: const Text('使用图框（尺寸不变，装不下自动分幅）',
                 style: TextStyle(color: kTextMain, fontSize: 13)),
             value: useFrame,
             activeColor: kAccent,
             onChanged: (v) => setSt(() => useFrame = v ?? true),
           ),
+          // 图框规格选择（A3 / A4 / 新块）
+          if (useFrame)
+            Padding(
+              padding: const EdgeInsets.only(left: 4, top: 2, bottom: 6),
+              child: Row(children: [
+                const Text('图框规格：',
+                    style: TextStyle(color: kTextSub, fontSize: 12.5)),
+                const SizedBox(width: 6),
+                for (final s in FrameSize.values) ...[
+                  InkWell(
+                    onTap: () => setSt(() => frameSize = s),
+                    borderRadius: BorderRadius.circular(6),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: frameSize == s
+                            ? kAccent.withValues(alpha: 0.18)
+                            : TokC.field,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(
+                          color: frameSize == s ? kAccent : TokC.divider,
+                          width: frameSize == s ? 1.4 : 0.6,
+                        ),
+                      ),
+                      child: Text(
+                        '${s.label}（${s.widthMm.round()}×'
+                        '${s.heightMm.round()}）',
+                        style: TextStyle(
+                          color: frameSize == s ? kAccent : kTextMain,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                ],
+              ]),
+            ),
           // —— 字高与倍率（用户可调）——
           Padding(
             padding: const EdgeInsets.only(top: 6, bottom: 2),
@@ -1624,6 +1668,7 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
         prefs.setBool('dxfShowNames', showNames);
         // 图框与颜色
         prefs.setBool('dxfUseFrame', useFrame);
+        prefs.setString('dxfFrameSize', frameSize.name);
         prefs.setInt('dxfLabelColor', labelColor);
         prefs.setInt('dxfDistColor', distColor);
         prefs.setInt('dxfRodColor', rodColor);
@@ -1668,7 +1713,7 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
             rodLineWidthMm: rodWidthMm,
             showLabelNames: showNames,
             // 图框：用户 DXF 原样搬用（尺寸不变，装不下自动分幅）
-            frame: useFrame ? await FrameLibrary.load() : null,
+            frame: useFrame ? await FrameLibrary.load(frameSize) : null,
             // 颜色覆盖：用户在"出图颜色"里选的自定义色
             colorOverrides: {
               if (labelColor != 0) 'BiaoQian': labelColor,

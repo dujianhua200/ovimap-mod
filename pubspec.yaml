@@ -51,6 +51,8 @@ flutter:
     - assets/dxf/lispblock.dxf
     # 图框：用户的 CAD 图框，导出时原样搬用（尺寸不变）
     - assets/frames/frame_a3.dxf
+    - assets/frames/frame_tk_a3.dxf
+    - assets/frames/frame_tk_a4.dxf
     # 内置兜底底图（信阳市矢量，约 21MB，gzip）。
     # 现场没信号时仍能出图：Overpass/高德抓不到就用它。
     # 来源：上游 dujianhua200/ovimap v4.0.x 的 assets/buildings。
