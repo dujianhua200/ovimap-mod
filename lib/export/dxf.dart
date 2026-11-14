@@ -169,6 +169,15 @@ class DxfExporter {
     /// **只影响图块本身**；杆路断开的间隙会跟着符号尺寸自动调整，
     /// 所以无论缩放到多少，线与符号始终相接（不脱开、不留大缝）。
     double symbolScale = 1.0,
+
+    /// 是否画**指北针**（圆 + 正三角形）。默认 true。
+    ///
+    /// 用户口径："导出的时候方框和中间是正三角形的符号不要" ——
+    /// 那个"方框套三角"就是旧的指北针符号，属于装饰件，不需要时可关。
+    bool showNorthArrow = true,
+
+    /// 是否画**图签栏**（左下那个 5 行统计框）。默认 true。
+    bool showTitleBlock = true,
   }) async {
     final warnings = <String>[];
     final dir = await LabelStore.instance.exportDir();
@@ -521,7 +530,9 @@ class DxfExporter {
           //   杆 / 拉线 / 其它设施      → 保持正立（0°）
           final rot = _shouldFollowRoute(lt) ? (dirAt[l.id] ?? 0.0) : 0.0;
           _appendInsert(c, 'BiaoQian', lt.id, x, y,
-              sx: symScale, sy: symScale, rotDeg: rot);
+              sx: symScale, sy: symScale, rotDeg: rot,
+              // 每个图标的独立颜色（用户口径：可以一个点一个色）
+              colorRgb: l.iconColor);
           // 名称（可关）：图块本体只含图例里那一个代号字（如 gl004 里的「木」）。
           // 用户口径「块中间没有连线，没有原字」→ showLabelNames=false 时
           // 不再额外压一行名称，只留图块本身。
@@ -646,12 +657,14 @@ class DxfExporter {
     if (showLegend) {
       _appendLegend(c, labels, extMinX, extMinY);
     }
-    _appendNorthArrow(c, extMaxX, extMaxY);
-    _appendTitleBlock(c, extMinX, extMinY, extMaxX, extMaxY,
-        name: name,
-        totalPoints: labels.length,
-        totalLength: routeTotalLen,
-        scale: routeScale);
+    if (showNorthArrow) _appendNorthArrow(c, extMaxX, extMaxY);
+    if (showTitleBlock) {
+      _appendTitleBlock(c, extMinX, extMinY, extMaxX, extMaxY,
+          name: name,
+          totalPoints: labels.length,
+          totalLength: routeTotalLen,
+          scale: routeScale);
+    }
 
     sb.write('0\nENDSEC\n');
 
@@ -1350,16 +1363,13 @@ class DxfExporter {
       required int scale}) {
     const w = 120.0, h = 30.0;
     // 图签放在**内容下方之外**（v3.18）。
-    //
-    // 原来画在 minY（内容底边）上，正好压在杆路上 —— 用户看到的
-    // "一个长方框，不知道是什么"，就是它。
-    // 现在整体下移到内容下方 6 个单位处，不再与图面重叠。
     const gapBelow = 6.0;
     final x0 = maxX - w, y0 = minY - gapBelow - h;
     final x1 = maxX, y1 = minY - gapBelow;
-    const rowH = h / 5; // 5 行分格
+    const rowsCount = 5;
+    final rowH = h / rowsCount; // 每行高 6.0
     _appendRect(c, 'TuQian', x0, y0, x1, y1);
-    for (var i = 1; i < 5; i++) {
+    for (var i = 1; i < rowsCount; i++) {
       _appendLine(c, 'TuQian', x0, y0 + rowH * i, x1, y0 + rowH * i);
     }
     final date = DateTime.now();
@@ -1372,9 +1382,20 @@ class DxfExporter {
       '总点数 $totalPoints · 总长度 ${_formatDistNoUnit(totalLength)}m',
       '比例 1:$scale（A3 幅面）',
     ];
+    // **文字必须在格子里居中**（v3.19 修："下方的方框字体老是错行"）。
+    //
+    // 旧公式 `y0 + rowH*(i+1) - rowH/2 - 1.2`：
+    //   · 每行高 6.0，字高 3.2，视觉中心应下移 0.35×3.2≈1.12 ✓ 数值接近；
+    //   · 但 `_text` 默认以**基线**为插入点，而这里没告诉它要居中，
+    //     再加上 `_text` 内部 centered=false，于是文字落在基线上 ——
+    //     行距 6.0、字高 3.2 时，基线位置偏差明显，看着就是"错行"。
+    //
+    // 改为：用 `centered: true` 让 `_text` 走统一的居中放样，
+    // 插入点直接给该格的几何中心，行高与字高的关系由 `_text` 内部处理。
+    final fontH = math.min(3.2, rowH * 0.62); // 字高不超格高，避免压线
     for (var i = 0; i < rows.length; i++) {
-      _text(c, 'TuQian', x0 + 2, y0 + rowH * (i + 1) - rowH / 2 - 1.2,
-          3.2, rows[i]);
+      final cy = y0 + rowH * i + rowH / 2; // 该行垂直中心
+      _text(c, 'TuQian', x0 + 2, cy, fontH, rows[i], centered: true);
     }
   }
 
@@ -1627,16 +1648,26 @@ class DxfExporter {
   /// [rotDeg]：旋转角（度）。**符号随线路方向**是现场图纸的惯例 ——
   /// 井/箱盖多为矩形，顺着杆路摆放才看得顺；原来固定 50=0，
   /// 结果所有井方向一致（用户反馈："井为什么方向一直是一个"）。
+  ///
+  /// [colorRgb]：**单个图块**的颜色覆盖（0xRRGGBB，0=跟随图层默认）。
+  /// 用户口径："图标颜色不是统一颜色，每个图标点都可以自定义颜色"。
+  /// R2000 写 62(ACI) + 420(真彩)；R12 只写 62。
   static void _appendInsert(
       _Ctx c, String layer, String name, double x, double y,
-      {double sx = 1, double sy = 1, double rotDeg = 0}) {
+      {double sx = 1, double sy = 1, double rotDeg = 0, int colorRgb = 0}) {
     c.ent('INSERT', layer, 'AcDbBlockReference');
     // 角度归一到 [0,360)，避免 -0.0 之类
     var rot = rotDeg % 360;
     if (rot < 0) rot += 360;
+    if (colorRgb != 0) {
+      c.sb.write('62\n${_aciForRgb(colorRgb)}\n');
+    }
     c.sb.write('2\n$name\n'
         '10\n${_fmt(x)}\n20\n${_fmt(y)}\n30\n0\n'
         '41\n${_fmt(sx)}\n42\n${_fmt(sy)}\n50\n${rot.toStringAsFixed(1)}\n');
+    if (colorRgb != 0 && c.r2000) {
+      c.sb.write('420\n${colorRgb & 0xFFFFFF}\n');
+    }
   }
 
   // ================= 配线图（DXF 内自动生成） =================

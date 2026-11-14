@@ -37,6 +37,10 @@ Future<void> showMapContextMenu(
     final draft = hit.sourceCid.isEmpty;
     items.addAll([
       PopupMenuItem<String>(value: 'edit', child: _mi(Icons.edit, '编辑属性')),
+      // 单点图标颜色：用户口径"每个图标点之前都可以自定义颜色"。
+      PopupMenuItem<String>(
+          value: 'icon_color',
+          child: _mi(Icons.palette_outlined, '设置此点图标颜色')),
     ]);
     if (draft) {
       items.addAll([
@@ -105,6 +109,9 @@ Future<void> showMapContextMenu(
           title: hit.label!.name.trim().isNotEmpty
               ? hit.label!.name.trim()
               : hit.label!.type.name);
+      break;
+    case 'icon_color':
+      await _pickIconColor(context, st, hit.label!, hit.sourceCid);
       break;
     case 'branch':
       st.setMode(AppMode.edit);
@@ -295,6 +302,95 @@ double _distToSegMeters(double pLat, double pLon, double aLat, double aLon,
 }
 
 // ================= 线段编辑 =================
+
+/// 给**单个点**设置图标颜色（用户口径："每个图标点之前都可以自定义颜色"）。
+///
+/// 与全局「标签颜色」的区别：这里是逐点覆盖，只影响这一个图标；
+/// 导出 DXF 时写成该 INSERT 的 62/420 组码，CAD 里也是各自独立的颜色。
+Future<void> _pickIconColor(
+    BuildContext context, AppState st, MapLabel l, String sourceCid) async {
+  const presets = <String, int>{
+    '跟随类型': 0,
+    '纯黑': 0x000000,
+    '大红': 0xD32F2F,
+    '橙色': 0xEF6C00,
+    '金黄': 0xF9A825,
+    '草绿': 0x2E7D32,
+    '青色': 0x00838F,
+    '宝蓝': 0x1565C0,
+    '紫色': 0x6A1B9A,
+    '玫红': 0xAD1457,
+    '纯白': 0xFFFFFF,
+  };
+  final picked = await showDialog<int>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: TokC.panel,
+      title: const Text('此点图标颜色', style: TextStyle(fontSize: 15)),
+      content: SizedBox(
+        width: 300,
+        child: Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final e in presets.entries)
+              InkWell(
+                onTap: () => Navigator.pop(ctx, e.value),
+                borderRadius: BorderRadius.circular(6),
+                child: Container(
+                  width: 92,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+                  decoration: BoxDecoration(
+                    color: TokC.field,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                      color: l.iconColor == e.value
+                          ? kAccent
+                          : TokC.divider,
+                      width: l.iconColor == e.value ? 1.5 : 0.6,
+                    ),
+                  ),
+                  child: Row(children: [
+                    Container(
+                      width: 13,
+                      height: 13,
+                      decoration: BoxDecoration(
+                        color: e.value == 0
+                            ? const Color(0xFFB0BEC5)
+                            : Color(e.value),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: const Color(0x33000000)),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(e.key,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style:
+                              const TextStyle(color: kTextMain, fontSize: 11)),
+                    ),
+                  ]),
+                ),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消', style: TextStyle(color: kTextSub))),
+      ],
+    ),
+  );
+  if (picked == null) return;
+  l.iconColor = picked;
+  st.updateLabel(l);
+  if (context.mounted) {
+    toast(context, picked == 0 ? '已恢复跟随类型颜色' : '此点图标颜色已设置');
+  }
+}
 
 Future<void> _editSegKind(BuildContext context, AppState st, _Seg seg) async {
   var kind = seg.b.segKind;

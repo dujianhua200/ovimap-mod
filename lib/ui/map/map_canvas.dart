@@ -784,8 +784,11 @@ List<Marker> buildBusinessMarkers(AppState st, MapCamera cam,
       label: skipName ? (l.clone()..name = '') : l,
       selected: selected || batchSel,
       scale: scale,
-      // 用户可配的标签颜色（null=默认色）。
-      overrideColor: st.labelColorOrNull,
+      // 颜色优先级：**本点自定义色** > 全局标签色 > 类型自带色。
+      // 用户口径："图标颜色不是统一颜色，每个图标点都可以自定义颜色"。
+      overrideColor: l.iconColor != 0
+          ? Color(l.iconColor | 0xFF000000)
+          : st.labelColorOrNull,
     );
     markers.add(Marker(
       point: LatLng(d[0], d[1]),

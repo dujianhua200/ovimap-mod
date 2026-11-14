@@ -1072,6 +1072,9 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
   // —— 字体高度与标签倍率（用户可调）——
   var distFontMm = prefs.getDouble('dxfDistFontMm') ?? 2.5;
   var symbolScale = prefs.getDouble('dxfSymbolScale') ?? 1.0;
+  // 指北针（圆+三角）与图签栏，用户可关
+  var showNorth = opt('dxfShowNorth', true);
+  var showTitle = opt('dxfShowTitle', true);
 
   // —— 搜索/兜底 key（导出与"底图检测"共用同一份，口径一致）——
   // 天地图 key：用户自定义优先，未配置则用内置兜底（单一来源）
@@ -1288,6 +1291,24 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
             value: showNames,
             activeColor: kAccent,
             onChanged: (v) => setSt(() => showNames = v ?? false),
+          ),
+          CheckboxListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: const Text('指北针（圆 + 正三角形符号）',
+                style: TextStyle(color: kTextMain, fontSize: 13)),
+            value: showNorth,
+            activeColor: kAccent,
+            onChanged: (v) => setSt(() => showNorth = v ?? true),
+          ),
+          CheckboxListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: const Text('图签统计栏（左下角方框）',
+                style: TextStyle(color: kTextMain, fontSize: 13)),
+            value: showTitle,
+            activeColor: kAccent,
+            onChanged: (v) => setSt(() => showTitle = v ?? true),
           ),
           CheckboxListTile(
             dense: true,
@@ -1608,6 +1629,8 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
         prefs.setInt('dxfRodColor', rodColor);
         prefs.setDouble('dxfDistFontMm', distFontMm);
         prefs.setDouble('dxfSymbolScale', symbolScale);
+        prefs.setBool('dxfShowNorth', showNorth);
+        prefs.setBool('dxfShowTitle', showTitle);
         toast(context, '正在生成 DXF…');
         try {
           final corridor =
@@ -1655,6 +1678,9 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
             // 字高与符号倍率（用户可调；断线间隙随倍率自适应）
             distFontMm: distFontMm,
             symbolScale: symbolScale,
+            // 指北针 / 图签栏（用户："方框和中间是正三角形的符号不要"）
+            showNorthArrow: showNorth,
+            showTitleBlock: showTitle,
           );
           if (context.mounted) {
             // 非致命警告 / 底图三态结构化说明（文件仍正常分享）

@@ -26,6 +26,14 @@ class MapLabel {
   /// 收藏项目自定义线颜色（0=默认），仅显示用，不落盘。
   int styleColor;
 
+  /// **本点图标的自定义颜色**（0xRRGGBB，0=跟随类型默认色）。
+  ///
+  /// 用户口径："图标颜色不是统一颜色，而是可以自定义颜色，
+  /// 每个图标点之前都可以自定义颜色"。
+  /// 与 [styleColor]（线段色）分开：一个是点、一个是线，互不干扰。
+  /// 会落盘（导出时同时作用于地图符号与 DXF 图块）。
+  int iconColor;
+
   /// 收藏项目自定义线宽（逻辑像素，0=默认），仅显示用。
   double styleWidth;
 
@@ -75,6 +83,7 @@ class MapLabel {
     this.distLabel = '',
     this.lineGroupId = '',
     this.styleColor = 0,
+    this.iconColor = 0,
     this.styleWidth = 0,
     this.closedArea = false,
     this.segKind = 0,
@@ -115,6 +124,7 @@ class MapLabel {
         distLabel: distLabel,
         lineGroupId: lineGroupId,
         styleColor: styleColor,
+        iconColor: iconColor,
         styleWidth: styleWidth,
         closedArea: closedArea,
         segKind: segKind,
@@ -154,6 +164,8 @@ class MapLabel {
     if (distanceM != null) m['distanceM'] = distanceM;
     if (slackM > 0) m['slackM'] = slackM;
     if (photoPaths.isNotEmpty) m['photoPaths'] = photoPaths;
+    // 图标自定义色（0=默认，不落盘以减小体积）
+    if (iconColor != 0) m['iconColor'] = iconColor;
     return m;
   }
 
@@ -177,6 +189,7 @@ class MapLabel {
       topoParentId: (jo['topoParentId'] as String?) ?? '',
       cableSpec: (jo['cableSpec'] as String?) ?? '',
       cableCores: (jo['cableCores'] as num?)?.toInt() ?? 0,
+      iconColor: (jo['iconColor'] as num?)?.toInt() ?? 0,
       distanceM: jo.containsKey('distanceM')
           ? (jo['distanceM'] as num?)?.toDouble()
           : null,
