@@ -49,6 +49,8 @@ BINARY_EXT = {
     '.dxf',        # AutoCAD 图例库（ASCII 组码 + GBK 中文，按设计不是 UTF-8）
     '.dwg', '.bak',
     '.so', '.dll', '.dylib', '.exe', '.bin', '.woff', '.woff2', '.ttf',
+    # v3.28：建筑分块二进制索引（自带二进制头部 + gzip 块，不是文本）
+    '.ovbld',
 }
 
 # 按文件名精确跳过的（无扩展名或有特殊用途）
