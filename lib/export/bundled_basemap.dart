@@ -352,7 +352,14 @@ class BundledBasemap {
     final idx = _buildingIndex;
     if (idx != null) {
       try {
-        return idx.query(lonMin, latMin, lonMax, latMax);
+        // 索引内部按 [lon,lat] 存（GeoJSON 原始顺序），
+        // 但 `BuildingPoly.rings` 的约定是 **[lat, lon]**（与 Overpass
+        // 解析一致，见 OverpassClient.parseBuildings）。这里转一次，
+        // 否则下游 distToRouteM / 坐标换算会把经纬度对调。
+        return [
+          for (final ring in idx.query(lonMin, latMin, lonMax, latMax))
+            [for (final p in ring) [p[1], p[0]]]
+        ];
       } catch (e) {
         loadErrors.add('建筑索引查询：$e');
       }

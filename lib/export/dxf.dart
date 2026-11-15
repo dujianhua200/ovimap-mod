@@ -1648,6 +1648,8 @@ class DxfExporter {
       var hit = false;
       for (final ring in b.rings) {
         for (final p in ring) {
+          // `BuildingPoly.rings` 的点是 `[lat, lon]`（与 Overpass 解析一致，
+          // 见 OverpassClient.parseBuildings）—— 这里保持原顺序，不要交换。
           if (near(p[0], p[1])) {
             hit = true;
             break;

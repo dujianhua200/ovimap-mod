@@ -6,7 +6,6 @@ import 'dart:math' as math;
 import 'package:http/http.dart' as http;
 
 import 'basemap.dart';
-
 /// 一次竞速的结果（原文 + 是否"空答案兜底"），供上层区分
 /// "该范围确实无数据"与"数据源异常/疑似镜像故障"。
 class OverpassFetchResult {
@@ -123,6 +122,104 @@ class OverpassClient {
   ///
   /// **不重试**的情形：所有端点都是 200 且都返回空集 —— 那是该范围确实无数据，
   /// 重试只是白等 12~24s × 3 个数据集（QA 明确要求的防劣化约束）。
+  /// 静态失败的"冷却期"标记（v3.29 导出提速）。
+  ///
+  /// ## 为什么需要
+  /// 一次导出要取 4 个数据集（道路/建筑/地名/周边）。用户的网络
+  /// 若完全连不上 Overpass，每个数据集都要等满 `12s × 2 轮 = 24s`，
+  /// 四路并行也要 24s+ 才结束 —— 实测这是"导出很慢"的最大单项。
+  ///
+  /// ## 做法
+  /// 任一轮**全部端点硬失败**（连不上/超时，不是"200 空"）时，
+  /// 记下时间戳；冷却期（90 秒）内后续调用**直接失败**，不再等待。
+  /// 一旦某个端点成功，清除标记。
+  ///
+  /// 冷却期内仍会给一次机会（`attempt == 0` 正常尝试），
+  /// 只是不再做"更耐心的重试轮"—— 网络整体不通时重试毫无意义。
+  static DateTime? _lastHardFailAll;
+  static const Duration hardFailCooldown = Duration(seconds: 90);
+
+  /// 当前是否处于"Overpass 整体不可达"的冷却期（诊断/UI 可读）。
+  static bool get inHardFailCooldown {
+    final t = _lastHardFailAll;
+    if (t == null) return false;
+    return DateTime.now().difference(t) < hardFailCooldown;
+  }
+
+  /// 是否启用"快速可达性探测"（v3.29）。
+  ///
+  /// 生产环境置 true（省掉断网时 24 秒的无效等待）；
+  /// 单元测试置 false（否则每个用例都要等 2.5 秒超时）。
+  ///
+  /// **默认值按环境判定**：`flutter test` 跑在 flutter_tester 上，
+  /// 那里 `NetworkRepository`/`Platform.environment` 有
+  /// `FLUTTER_TEST` 标记 —— 用它自动关闭，避免 98 个测试文件逐个改。
+  static bool? _quickEnabledOverride;
+  static bool get quickReachableEnabled {
+    final o = _quickEnabledOverride;
+    if (o != null) return o;
+    return !_isFlutterTest;
+  }
+
+  static set quickReachableEnabled(bool v) => _quickEnabledOverride = v;
+
+  /// 是否运行在 flutter test 环境。
+  ///
+  /// flutter_tester 的可执行文件名固定为 `flutter_tester`，
+  /// 用它判定比读环境变量可靠（实测 FLUTTER_TEST 并不总被设置）。
+  static bool get _isFlutterTest {
+    try {
+      final exe = Platform.resolvedExecutable.toLowerCase();
+      return exe.contains('flutter_tester') || exe.contains('flutter_tools');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 清空冷却标记（测试或用户手动重试用）。
+  static void clearHardFailCooldown() => _lastHardFailAll = null;
+
+  /// 快速探测端点是否可达（v3.29）。
+  ///
+  /// 只做一次 HEAD 请求、总预算 [budget] 毫秒；任一端点有响应即算通。
+  /// 目的不是"验证 Overpass 可用"，而是**在完全断网时省掉 24 秒等待**
+  /// （一次导出要取 4 个数据集 × 12s 超时 × 2 轮）。
+  ///
+  /// 已处于冷却期直接返回 false，不再联网。
+  static Future<bool> quickReachable(
+    List<String> endpoints, {
+    Duration budget = const Duration(milliseconds: 2500),
+  }) async {
+    if (inHardFailCooldown) return false;
+    if (endpoints.isEmpty) return false;
+
+    for (final ep in endpoints.take(3)) {
+      try {
+        final client = HttpClient()
+          ..connectionTimeout = budget
+          ..idleTimeout = budget;
+        try {
+          final uri = Uri.parse(ep);
+          final req = await client
+              .headUrl(uri)
+              .timeout(budget);
+          final resp = await req.close().timeout(budget);
+          // 任何 HTTP 响应（含 4xx/5xx）都说明**网络通**，
+          // Overpass 服务本身可能忙，那种情况交给正常重试。
+          await resp.drain<void>();
+          return true;
+        } finally {
+          client.close(force: true);
+        }
+      } catch (_) {
+        // 这个端点不通，试下一个
+      }
+    }
+    // 全部不通 → 记冷却，后续数据集不再逐个等待
+    _lastHardFailAll = DateTime.now();
+    return false;
+  }
+
   static Future<OverpassFetchResult> fetchRawDetailed(
     String query, {
     List<String>? endpoints,
@@ -132,6 +229,7 @@ class OverpassClient {
     final eps = (endpoints == null || endpoints.isEmpty)
         ? OverpassEndpoints.builtin()
         : endpoints;
+
     Object? lastErr;
     for (var attempt = 0; attempt <= retries; attempt++) {
       final t = attempt == 0
@@ -139,13 +237,20 @@ class OverpassClient {
           : timeout * retryTimeoutFactor; // 重试轮更耐心
       try {
         final r = await _raceOnce(query, eps, t);
+        // 有端点成功 → 网络恢复，清掉冷却标记
+        if (r.hardFailures < eps.length) _lastHardFailAll = null;
+
         // O1：**只在"有端点硬失败 + 只能拿空答案收场"时再抢一轮**。
         // 典型场景：主站忙时 4 个 504、仅 1 个镜像回了空 —— 这时重试很可能救回数据；
         // 而"所有端点都是 200 空"= 该范围确实无数据，重试只是白等 12~24s × 3 个数据集。
         final worthRetry = r.emptyFallback && r.hardFailures > 0;
-        if (!worthRetry || attempt == retries) return r;
+        // **整体不可达时不重试**（v3.29）：省掉 12~24 秒无效等待。
+        // 注意只影响"是否再抢一轮"，首轮仍会正常请求全部端点。
+        if (!worthRetry || attempt == retries || inHardFailCooldown) return r;
       } catch (e) {
         lastErr = e;
+        // 全部端点硬失败 → 记冷却，后续数据集不再白等
+        _lastHardFailAll = DateTime.now();
         if (attempt == retries) {
           throw HttpException(
               'overpass 所有端点均失败（已重试 $retries 次）: $lastErr');

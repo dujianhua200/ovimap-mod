@@ -463,14 +463,60 @@ class BasemapFetcher {
   /// 角落也框进来（用户反馈"导出的矢量还是太广"）。做线路设计要的是
   /// **沿轨迹附近 N 米**，所以按到折线的距离判定。
   static double distToRouteM(List<MapLabel> labels, double lat, double lon) {
-    final segs = _routeSegments(labels);
+    final segs = _routeSegmentsCached(labels);
     if (segs.isEmpty) return 0;
+
+    // **先用 bbox 粗筛**（v3.29 性能）：绝大多数建筑离线路很远，
+    // 先用"线路外包框 + 500m"排除，省掉逐段的三角运算。
+    if (lat < _cacheMinLat - 0.005 || lat > _cacheMaxLat + 0.005) {
+      return 1e7; // 远到不可能在缓冲内（调用方只比较 <= rangeM）
+    }
+    if (lon < _cacheMinLon - 0.005 || lon > _cacheMaxLon + 0.005) {
+      return 1e7;
+    }
+
     var best = double.infinity;
     for (final seg in segs) {
       final d = _distToSegM(lat, lon, seg[0], seg[1], seg[2], seg[3]);
       if (d < best) best = d;
     }
     return best;
+  }
+
+  // ---- 线段表缓存（v3.29）----
+  //
+  // 导出一张图要对**几万个建筑顶点**算"到线路的距离"。
+  // 原实现每次调用都重建线段表（遍历 + 分组 + 排序 labels），
+  // 实测 300 点线路导出 8.9 秒，主要耗在这里。
+  // 现在按 labels 的"指纹"缓存，同一批点只建一次。
+  static List<List<double>>? _segCache;
+  static String _segCacheKey = '';
+  static double _cacheMinLat = 0, _cacheMaxLat = 0;
+  static double _cacheMinLon = 0, _cacheMaxLon = 0;
+
+  static List<List<double>> _routeSegmentsCached(List<MapLabel> labels) {
+    // 指纹：点数 + 首尾 id + 每组数量（足够区分不同线路，成本极低）
+    final key = '${labels.length}|${labels.isEmpty ? '' : labels.first.id}|'
+        '${labels.isEmpty ? '' : labels.last.id}';
+    if (_segCache != null && key == _segCacheKey) return _segCache!;
+
+    final segs = _routeSegments(labels);
+    // 同时算出行程外包框（用于快速排除）
+    var mnLa = double.infinity, mxLa = -double.infinity;
+    var mnLo = double.infinity, mxLo = -double.infinity;
+    for (final l in labels) {
+      if (l.lat < mnLa) mnLa = l.lat;
+      if (l.lat > mxLa) mxLa = l.lat;
+      if (l.lon < mnLo) mnLo = l.lon;
+      if (l.lon > mxLo) mxLo = l.lon;
+    }
+    _cacheMinLat = mnLa;
+    _cacheMaxLat = mxLa;
+    _cacheMinLon = mnLo;
+    _cacheMaxLon = mxLo;
+    _segCache = segs;
+    _segCacheKey = key;
+    return segs;
   }
 
   /// 把点按线组串成折线段 `[lat1, lon1, lat2, lon2]`（同组按 seq；无组则整条）。
@@ -948,6 +994,26 @@ class BasemapFetcher {
       }
     }
     try {
+      // **网络整体不可达时快速失败**（v3.29 导出提速）。
+      //
+      // 一次导出要取 4 个数据集，每个默认 `12s 超时 × 2 轮`。用户网络
+      // 若完全连不上 Overpass（实测本机所有端点超时/521），四路并行也要
+      // 等 24 秒以上 —— 这是"导出很慢"的最大单项。
+      //
+      // 这里在第一次真正发查询前花最多 2.5 秒探一次；不通就立刻失败，
+      // 由上层用内置底图（信阳全域 176 万栋建筑 + 道路 + 地名）补全。
+      //
+      // ⚠️ 测试/离线场景可用 [OverpassClient.quickReachableEnabled] 关闭，
+      // 避免单元测试真的发起网络请求（否则会被 2.5s 超时拖垮）。
+      if (OverpassClient.quickReachableEnabled &&
+          (OverpassClient.inHardFailCooldown ||
+              !await OverpassClient.quickReachable(endpoints))) {
+        return _LoadResult(
+          DatasetReport(FetchState.failed,
+              error: '网络不可达（已快速跳过，改用内置底图）'),
+          const [],
+        );
+      }
       // 端点列表：用户自定义优先、内置兜底（[BasemapFetcher.fetchFor] 已由
       // [OverpassEndpoints.resolve] 解析好）；空答案闸门/重试/竞速语义均不变。
       final got =
