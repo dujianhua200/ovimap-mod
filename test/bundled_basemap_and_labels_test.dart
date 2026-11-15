@@ -21,11 +21,14 @@ void main() {
       expect(BundledBasemap.enabled, isFalse);
     });
 
-    test('资源登记齐全（三个 gz 都在 pubspec 且能读到）', () async {
+    test('资源登记齐全（建筑索引 + 道路 + 地名都在 pubspec 且能读到）', () async {
       // pubspec 登记检查：读不到会在 load 时抛，这里直接验资源存在
+      //
+      // v3.28：建筑从 GeoJSON gzip 换成分块二进制索引（.ovbld）。
+      // 体积不变（57MB），但查询从 15s/次 降到几十 ms。
       final root = Directory.current;
       for (final name in const [
-        'xinyang.geojson.gz',
+        'xinyang.ovbld',
         'xinyang_roads.geojson.gz',
         'xinyang_places.geojson.gz',
       ]) {

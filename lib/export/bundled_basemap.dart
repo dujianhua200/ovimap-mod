@@ -30,6 +30,8 @@ import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/services.dart' show rootBundle;
 
+import 'building_index.dart';
+
 /// 数据覆盖范围（WGS84 经纬度）。
 ///
 /// ⚠️ 这组常量必须**小于等于数据实际范围**，否则 `covers()` 会把
@@ -55,6 +57,11 @@ const double kBundledLatMax = 32.58;
 const int kBundledBasemapVersion = 1;
 
 const String kBundledBuildingsAsset = 'assets/buildings/xinyang.geojson.gz';
+
+/// 建筑**分块二进制索引**（v3.28）。体积与 gz 持平（约 57MB），
+/// 但查询只解压命中的网格块 —— 实测 15s/次 → 几十 ms。
+/// 由 `tool/build_index.py` 生成；缺失时自动回退 [kBundledBuildingsAsset]。
+const String kBundledBuildingsIndexAsset = 'assets/buildings/xinyang.ovbld';
 const String kBundledRoadsAsset = 'assets/buildings/xinyang_roads.geojson.gz';
 const String kBundledPlacesAsset = 'assets/buildings/xinyang_places.geojson.gz';
 
@@ -155,7 +162,7 @@ class BundledBasemap {
   bool get roadsLoaded => _roads.isNotEmpty;
   bool get placesLoaded => _places.isNotEmpty;
   /// 建筑数据是否可用（只看字节在不在，不看解析结果）。
-  bool get buildingsLoaded => _buildingsGzBytes != null;
+  bool get buildingsLoaded => _buildingIndex != null || _buildingsGzBytes != null;
 
   /// 给定 bbox **是否与内置数据范围有交集**。
   ///
@@ -225,23 +232,39 @@ class BundledBasemap {
 
     // **建筑数据不在加载时解析**（v3.16 内存修复）。
     //
-    // 背景：建筑有 70 万栋，全量解析进内存要 1.5~2 GB ——
-    // 用户实测任务管理器里 ovimap 占到 1967 MB，机器直接卡死。
+    // 背景：建筑有 176 万栋，全量解析进内存要 2~4 GB。
     //
-    // 改为：这里只**记住压缩字节**（21MB），第一次查询建筑时才解压解析，
-    // 且解析结果**只保留 bbox 内的**，用完即弃。
-    // 代价是首次查询慢一点（约 3~5 秒），换来常驻内存从 2GB 降到几十 MB。
+    // v3.28：改读**分块二进制索引**（xinyang.ovbld）。
+    // 旧的 GeoJSON gzip 每次查询要解压 57MB + jsonDecode 176 万栋，
+    // 实测 15 秒/次；索引版只解压命中的几块（几百 KB）。
+    // 索引不存在时回退到 GeoJSON（保持向后兼容）。
     try {
-      final raw = await rootBundle.load(kBundledBuildingsAsset);
-      _buildingsGzBytes = raw.buffer.asUint8List();
-    } catch (e) {
-      loadErrors.add('建筑：$e');
+      final raw = await rootBundle.load(kBundledBuildingsIndexAsset);
+      final idx = BuildingIndex.parse(raw.buffer.asUint8List());
+      if (idx != null) {
+        _buildingIndex = idx;
+      } else {
+        loadErrors.add('建筑索引格式不识别，回退 GeoJSON');
+      }
+    } catch (_) {
+      // 索引文件不存在 → 回退旧路径
+    }
+    if (_buildingIndex == null) {
+      try {
+        final raw = await rootBundle.load(kBundledBuildingsAsset);
+        _buildingsGzBytes = raw.buffer.asUint8List();
+      } catch (e) {
+        loadErrors.add('建筑：$e');
+      }
     }
     _loaded = true;
     _loadMs = sw.elapsedMilliseconds;
   }
 
-  /// 建筑数据的压缩字节（惰性解析用；不在内存里存解析结果）。
+  /// 建筑分块索引（v3.28，优先路径）。
+  BuildingIndex? _buildingIndex;
+
+  /// 建筑数据的压缩字节（旧路径，索引不可用时回退）。
   Uint8List? _buildingsGzBytes;
 
   /// 是否已经跑过 [_load]（无论成功失败）。
@@ -325,9 +348,31 @@ class BundledBasemap {
   /// 代价是每次导出多几秒，换来常驻内存从 GB 级降到几十 MB。
   List<List<List<double>>> buildingsIn(
       double lonMin, double latMin, double lonMax, double latMax) {
+    // **优先走分块索引**（v3.28）：只解压命中的网格，几百 KB 而非 57MB。
+    final idx = _buildingIndex;
+    if (idx != null) {
+      try {
+        return idx.query(lonMin, latMin, lonMax, latMax);
+      } catch (e) {
+        loadErrors.add('建筑索引查询：$e');
+      }
+    }
+
     final gz = _buildingsGzBytes;
     if (gz == null) return const [];
+    return _buildingsFromGeojson(gz, lonMin, latMin, lonMax, latMax);
+  }
 
+  /// **强制走旧 GeoJSON 路径**（仅测试用：验证两条路径结果一致）。
+  List<List<List<double>>> buildingsInGeojsonOnly(
+          double lonMin, double latMin, double lonMax, double latMax) =>
+      _buildingsFromGeojson(
+          _buildingsGzBytes ?? Uint8List(0), lonMin, latMin, lonMax, latMax);
+
+  /// 旧路径实现（v3.28 之前的主路径，也是索引不可用时的回退）。
+  List<List<List<double>>> _buildingsFromGeojson(Uint8List gz,
+      double lonMin, double latMin, double lonMax, double latMax) {
+    if (gz.isEmpty) return const [];
     // 快速排除：与数据总范围无交集
     if (lonMax < _bMinLon || lonMin > _bMaxLon) return const [];
     if (latMax < _bMinLat || latMin > _bMaxLat) return const [];
@@ -388,9 +433,13 @@ class BundledBasemap {
     final errs = loadErrors.isEmpty
         ? ''
         : '\n加载异常：${loadErrors.join('；')}';
+    // 建筑：走分块索引时报告"索引"（v3.28），回退 GeoJSON 时报"惰性"
+    final bldState = _buildingIndex != null
+        ? '已就绪（惰性，分块索引）'
+        : (_buildingsGzBytes != null ? '已就绪（惰性，按范围过滤）' : '未加载');
     return '道路 ${_roads.length} 条（${box(_rMinLat, _rMaxLat, _rMinLon, _rMaxLon)}）\n'
         '地名 ${_places.length} 个（${box(_pMinLat, _pMaxLat, _pMinLon, _pMaxLon)}）\n'
-        '建筑 ${_buildingsGzBytes != null ? '已就绪（惰性，按范围过滤）' : '未加载'}'
+        '建筑 $bldState'
         '（${box(_bMinLat, _bMaxLat, _bMinLon, _bMaxLon)}）\n'
         '耗时 ${_loadMs}ms$errs';
   }

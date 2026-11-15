@@ -56,6 +56,6 @@ flutter:
     # 内置兜底底图（信阳市矢量，约 21MB，gzip）。
     # 现场没信号时仍能出图：Overpass/高德抓不到就用它。
     # 来源：上游 dujianhua200/ovimap v4.0.x 的 assets/buildings。
-    - assets/buildings/xinyang.geojson.gz
+    - assets/buildings/xinyang.ovbld
     - assets/buildings/xinyang_roads.geojson.gz
     - assets/buildings/xinyang_places.geojson.gz
