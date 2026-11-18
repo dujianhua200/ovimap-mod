@@ -193,31 +193,90 @@ class OverpassClient {
     if (inHardFailCooldown) return false;
     if (endpoints.isEmpty) return false;
 
-    for (final ep in endpoints.take(3)) {
-      try {
-        final client = HttpClient()
-          ..connectionTimeout = budget
-          ..idleTimeout = budget;
-        try {
-          final uri = Uri.parse(ep);
-          final req = await client
-              .headUrl(uri)
-              .timeout(budget);
-          final resp = await req.close().timeout(budget);
-          // 任何 HTTP 响应（含 4xx/5xx）都说明**网络通**，
-          // Overpass 服务本身可能忙，那种情况交给正常重试。
-          await resp.drain<void>();
-          return true;
-        } finally {
-          client.close(force: true);
-        }
-      } catch (_) {
-        // 这个端点不通，试下一个
-      }
+    // **后台预热优先**（v3.30）：应用启动时已异步探过一次，
+    // 这里直接读结果，导出不再等 DNS/连接超时。
+    final warm = _warmProbeResult;
+    if (warm != null) return warm;
+
+    // 复用同一次探测（一次导出会并发发起 4 个数据集）
+    final inFlight = _probeInFlight;
+    if (inFlight != null) return inFlight;
+
+    final f = _probeAll(endpoints, budget);
+    _probeInFlight = f;
+    try {
+      return await f;
+    } finally {
+      _probeInFlight = null;
     }
-    // 全部不通 → 记冷却，后续数据集不再逐个等待
+  }
+
+  static Future<bool>? _probeInFlight;
+
+  /// 后台预热探测的结果（应用启动时调 [warmUpProbe] 填充）。
+  static bool? _warmProbeResult;
+
+  /// **后台预热**：应用启动后异步探一次，把结果缓存起来。
+  ///
+  /// 这样用户第一次导出时不必再等 DNS/连接超时（实测 1.2 秒）。
+  /// 失败时记入冷却期，同样让导出立刻走内置底图。
+  static Future<void> warmUpProbe(List<String> endpoints,
+      {Duration budget = const Duration(milliseconds: 2000)}) async {
+    if (_warmProbeResult != null) return;
+    try {
+      _warmProbeResult = await _probeAll(endpoints, budget);
+    } catch (_) {
+      _warmProbeResult = false;
+    }
+  }
+
+  /// 清空预热结果（网络环境变化 / 用户手动重试用）。
+  static void clearWarmProbe() {
+    _warmProbeResult = null;
+    _lastHardFailAll = null;
+  }
+
+  static Future<bool> _probeAll(
+      List<String> endpoints, Duration budget) async {
+    final sw = Stopwatch()..start();
+    // **整体预算**而不是每端点预算：
+    // 原实现给每个端点单独超时，3 个最坏 = 7.5 秒。
+    // 现在所有端点**同时**探测、共享一个总预算。
+    final futures = <Future<bool>>[
+      for (final ep in endpoints.take(3)) _probeOne(ep),
+    ];
+    try {
+      final results = await Future.wait(futures).timeout(budget,
+          onTimeout: () => List<bool>.filled(futures.length, false));
+      assert(() {
+        // ignore: avoid_print
+        print('[probe] ${sw.elapsedMilliseconds}ms results=$results');
+        return true;
+      }());
+      if (results.any((v) => v)) return true;
+    } catch (_) {
+      // 全部异常 = 不通
+    }
     _lastHardFailAll = DateTime.now();
     return false;
+  }
+
+  /// 探测单个端点是否可达（HEAD，短超时）。
+  static Future<bool> _probeOne(String endpoint,
+      {Duration timeout = const Duration(milliseconds: 2200)}) async {
+    final client = HttpClient()
+      ..connectionTimeout = timeout
+      ..idleTimeout = timeout;
+    try {
+      final req = await client.headUrl(Uri.parse(endpoint)).timeout(timeout);
+      final resp = await req.close().timeout(timeout);
+      await resp.drain<void>();
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      client.close(force: true);
+    }
   }
 
   static Future<OverpassFetchResult> fetchRawDetailed(

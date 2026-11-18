@@ -150,6 +150,7 @@ void main() {
         name: '注入路径',
         labels: _labels(),
         includeSurroundings: true,
+        roadStyle: RoadStyle.doubleLine,
         rangeM: 300,
         basemap: buildSyntheticBasemap(),
         version: DxfVersion.r2000,
@@ -205,6 +206,7 @@ void main() {
         name: '抓取路径',
         labels: _labels(),
         includeSurroundings: true,
+        roadStyle: RoadStyle.doubleLine,
         rangeM: 300,
         version: DxfVersion.r2000,
       );

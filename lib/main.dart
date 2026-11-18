@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import 'models/label_type.dart';
 import 'export/bundled_basemap.dart';
+import 'export/overpass.dart';
 import 'services/platform_caps.dart';
 import 'state/app_state.dart';
 import 'symbols/symbol_catalog.dart';
@@ -15,6 +16,13 @@ import 'ui/home_page.dart';
 
 void main(List<String> args) {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // **后台预热 Overpass 可达性**（v3.30 导出提速）。
+  //
+  // 导出时要判断"能不能联网取底图"，这个探测在断网时会等 1~2 秒
+  // （DNS/连接超时）。放在这里异步跑，用户第一次导出时结果已就绪，
+  // 不再白等。不 await，不阻塞启动。
+  unawaited(OverpassClient.warmUpProbe(OverpassEndpoints.builtin()));
   // 移动端保持竖屏；桌面端（Windows / macOS / Linux）**不加方向约束**，
   // 允许 1024×680 起的任意窗口尺寸 —— 桌面三栏壳在竖屏锁下会被压成一团。
   //

@@ -1060,6 +1060,13 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
   // 是否在符号上方写名称：默认关（用户口径"块中间没有原字"）。
   var showNames = opt('dxfShowNames', false);
 
+  // —— 道路样式与宽度（v3.30）——
+  var roadStyle = RoadStyle.values.firstWhere(
+    (s) => s.name == (prefs.getString('dxfRoadStyle') ?? ''),
+    orElse: () => RoadStyle.single,
+  );
+  var roadWidthScale = prefs.getDouble('dxfRoadWidthScale') ?? 1.0;
+
   // —— 图框（用户 DXF，原样搬用，尺寸不变）——
   var useFrame = opt('dxfUseFrame', true);
   // 图框规格（用户口径："弄个选择，比如选择 A3 或者 A4"）
@@ -1288,6 +1295,64 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
               ),
             ]),
           ),
+          // —— 道路样式与宽度（v3.30，用户："有的是双线，我只要单线"+"太窄"）——
+          Padding(
+            padding: const EdgeInsets.only(top: 8, bottom: 2),
+            child: Row(children: [
+              const Text('道路',
+                  style: TextStyle(color: kTextMain, fontSize: 13)),
+              const SizedBox(width: 10),
+              for (final s in RoadStyle.values) ...[
+                InkWell(
+                  onTap: () => setSt(() => roadStyle = s),
+                  borderRadius: BorderRadius.circular(6),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: roadStyle == s
+                          ? kAccent.withValues(alpha: 0.18)
+                          : TokC.field,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(
+                        color: roadStyle == s ? kAccent : TokC.divider,
+                        width: roadStyle == s ? 1.4 : 0.6,
+                      ),
+                    ),
+                    child: Text(s.label,
+                        style: TextStyle(
+                          color: roadStyle == s ? kAccent : kTextMain,
+                          fontSize: 12,
+                        )),
+                  ),
+                ),
+                const SizedBox(width: 6),
+              ],
+              const SizedBox(width: 10),
+              const Text('线宽 ×',
+                  style: TextStyle(color: kTextSub, fontSize: 12.5)),
+              const SizedBox(width: 6),
+              SizedBox(
+                width: 70,
+                child: TextFormField(
+                  initialValue: roadWidthScale.toString(),
+                  style: const TextStyle(color: kTextMain, fontSize: 13),
+                  decoration: dec('1.0'),
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  onChanged: (v) => roadWidthScale =
+                      (double.tryParse(v.trim()) ?? 1.0).clamp(0.3, 5.0),
+                ),
+              ),
+            ]),
+          ),
+          // 加宽时建筑随之外移的说明
+          if (roadWidthScale > 1.0)
+            const Padding(
+              padding: EdgeInsets.only(left: 4, bottom: 4),
+              child: Text('路加宽后，贴近道路的建筑会自动向外让开相同距离',
+                  style: TextStyle(color: kTextSub, fontSize: 11.5)),
+            ),
           CheckboxListTile(
             dense: true,
             contentPadding: EdgeInsets.zero,
@@ -1669,6 +1734,8 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
         // 图框与颜色
         prefs.setBool('dxfUseFrame', useFrame);
         prefs.setString('dxfFrameSize', frameSize.name);
+        prefs.setString('dxfRoadStyle', roadStyle.name);
+        prefs.setDouble('dxfRoadWidthScale', roadWidthScale);
         prefs.setInt('dxfLabelColor', labelColor);
         prefs.setInt('dxfDistColor', distColor);
         prefs.setInt('dxfRodColor', rodColor);
@@ -1728,6 +1795,9 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
             showTitleBlock: showTitle,
             // 让"底图范围"档位对注入的本地底图也生效
             clipInjectedBasemap: true,
+            // 道路样式与宽度（v3.30）
+            roadStyle: roadStyle,
+            roadWidthScale: roadWidthScale,
           );
           if (context.mounted) {
             // 非致命警告 / 底图三态结构化说明（文件仍正常分享）

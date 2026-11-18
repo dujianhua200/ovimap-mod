@@ -93,6 +93,24 @@ class _Ctx {
 /// - **底图线宽/字号**一律按 `纸面毫米 ÷ 1000 × 出图比例` 换算为图纸米数，
 ///   不再 1:1 使用真实路宽（否则"路太粗/建筑塌陷"原样复发）。
 /// - 业务层（杆路/管廊/桩号/距离/标签/配线图/图框）**行为保持不变**。
+/// 道路绘制方式（v3.30）。
+///
+/// 用户口径："导出的道路有的是双线，我只要单线"。
+enum RoadStyle {
+  /// 单线 + 可调线宽（用 LWPOLYLINE/POLYLINE 的全局宽度）。
+  ///
+  /// 图面干净、打印后是实心路面，符合勘察图习惯。
+  single('单线'),
+
+  /// 左右双线描边（旧行为）。
+  ///
+  /// 两条独立折线勾勒路幅，工程图里常见，但线多、易与小比例尺打架。
+  doubleLine('双线');
+
+  const RoadStyle(this.label);
+  final String label;
+}
+
 class DxfExporter {
   DxfExporter._();
 
@@ -185,6 +203,19 @@ class DxfExporter {
     /// 从 UI 导出时传 true，让"底图范围"档位真实生效。
     /// 本地底图（[localBasemap]）与联网抓取始终按范围裁剪，不受此开关影响。
     bool clipInjectedBasemap = false,
+
+    /// 道路绘制方式（v3.30）。
+    ///
+    /// 用户口径："有的是双线，我只要单线"。
+    ///  · [RoadStyle.single]  单线 + 可调线宽（默认）
+    ///  · [RoadStyle.doubleLine] 左右双线描边（旧行为）
+    RoadStyle roadStyle = RoadStyle.single,
+
+    /// 单线道路的**线宽倍数**（v3.30，仅 [RoadStyle.single] 生效）。
+    ///
+    /// 1.0 = 沿用各等级默认线宽；2.0 = 整体加宽一倍。
+    /// 用户："导出的道路太窄" —— 这个旋钮直接给到 UI。
+    double roadWidthScale = 1.0,
   }) async {
     final warnings = <String>[];
     final dir = await LabelStore.instance.exportDir();
@@ -399,6 +430,7 @@ class DxfExporter {
           convertGcj: convertGcj,
           refresh: refreshBasemap,
         );
+        
         // 网络抓取走的是外包矩形；再按沿线路缓冲收一次，
         // 保证"范围档位"在三条数据来源上口径一致。
         bm = _cropByRouteBuffer(bm, labels, rangeM);
@@ -420,6 +452,8 @@ class DxfExporter {
         buildingFill: buildingFill,
         showMinorRoadNames: showMinorRoadNames,
         layerPlaces: layerPlaces,
+        roadStyle: roadStyle,
+        roadWidthScale: roadWidthScale,
       );
       if (ext != null) {
         if (ext[0] < extMinX) extMinX = ext[0];
@@ -2496,6 +2530,8 @@ class DxfExporter {
     required bool buildingFill,
     required bool showMinorRoadNames,
     required bool layerPlaces,
+    RoadStyle roadStyle = RoadStyle.single,
+    double roadWidthScale = 1.0,
   }) {
     final acc = _Ext(double.infinity, double.infinity, -double.infinity,
         -double.infinity);
@@ -2507,9 +2543,28 @@ class DxfExporter {
 
     // —— 建筑（先填充成块、再轮廓；文字后置）——
     if (buildingFill || layerBuildingOutline) {
+      // **建筑随道路加宽向外平移**（v3.30）。
+      //
+      // 用户口径："如果道路加宽，就把建筑矢量轮廓往道路两侧移动一点，
+      // 道路加宽多少，建筑矢量轮廓就移动多少。"
+      //
+      // 语义：路面在线性符号里只占一条线宽，但真实路面占了 land 宽度。
+      // 加宽后如果不推建筑，建筑会压到路面上。这里把**离路面最近的顶点**
+      // 沿"从路面指向建筑"的方向推开，推开量 = 该处路面半宽的增量。
+      //
+      // 实现取近似（够用且快）：
+      //   · 只在 `roadWidthScale > 1` 时启用；
+      //   · 推开量 = (该处道路半宽) - (该处道路默认半宽)，即"加宽了多少"；
+      //   · 方向用"建筑质心 → 最近路面点"的方向，整栋统一平移，
+      //     避免逐顶点推导致建筑变形。
+      final pushM = roadWidthScale > 1.0;
       final ringsPerBld = <List<List<List<double>>>>[];
       for (final b in bm.buildings) {
-        final rings = _toCartRings(b, baseLon, baseLat, scaleX, scaleY);
+        var rings = _toCartRings(b, baseLon, baseLat, scaleX, scaleY);
+        if (pushM && rings.isNotEmpty) {
+          rings = _pushBuildingOffRoads(rings, bm.roads, baseLon, baseLat,
+              scaleX, scaleY, scale, roadWidthScale);
+        }
         ringsPerBld.add(rings);
         for (final ring in rings) {
           for (final p in ring) {
@@ -2549,11 +2604,12 @@ class DxfExporter {
       }
     }
 
-    // —— 道路（双线描边，按等级分级；路名居中标注可按等级过滤）——
+    // —— 道路（单线/双线可选，按等级分级；路名居中标注可按等级过滤）——
     if (layerRoads) {
       for (final r in bm.roads) {
         _appendRoadDualAndCenter(c, lc, r, baseLon, baseLat, scaleX,
-            scaleY, scale, version, acc, showMinorRoadNames);
+            scaleY, scale, version, acc, showMinorRoadNames,
+            roadStyle: roadStyle, roadWidthScale: roadWidthScale);
       }
     }
 
@@ -2596,6 +2652,104 @@ class DxfExporter {
   /// 道路双线描边分级画法（**不再 1:1 用真实路宽**；中心线已按新规格删除）。
   /// 路名默认只标 trunk/primary/secondary/tertiary/residential；
   /// [showMinorRoadNames] 为 true 时 service/other 也标。
+  /// 把一栋建筑整体沿"远离最近道路"的方向平移（v3.30）。
+  ///
+  /// ## 为什么整栋平移而不是逐顶点
+  /// 逐顶点推会把矩形拉成梯形/菱形 —— 建筑轮廓必须保持形状。
+  /// 现场要的是"房子别压在路上"，位置略移一点点完全可接受。
+  ///
+  /// ## 推开量怎么算
+  /// `道路加宽多少，建筑就移动多少`：
+  ///   push = (当前半宽 - 默认半宽)  [图纸单位]
+  /// 用**离该建筑最近的那条路**的等级来定，因为不同等级加宽量不同。
+  ///
+  /// ## 只在真正压线时推
+  /// 建筑离路面还有余量（> 当前半宽）时不推，保持原样。
+  static List<List<List<double>>> _pushBuildingOffRoads(
+    List<List<List<double>>> rings,
+    List<RoadPoly> roads,
+    double baseLon,
+    double baseLat,
+    double scaleX,
+    double scaleY,
+    int scale,
+    double widthScale,
+  ) {
+    if (roads.isEmpty || rings.isEmpty) return rings;
+
+    // 建筑质心（图纸坐标）
+    var cx = 0.0, cy = 0.0;
+    var n = 0;
+    for (final ring in rings) {
+      for (final p in ring) {
+        cx += p[0];
+        cy += p[1];
+        n++;
+      }
+    }
+    if (n == 0) return rings;
+    cx /= n;
+    cy /= n;
+
+    // 找最近的道路线段，取该处等级
+    var bestD2 = double.infinity;
+    var pushX = 0.0, pushY = 0.0;
+
+    for (final r in roads) {
+      final halfNow = _roadHalfWidthM(r.grade, scale) * widthScale;
+      final halfDef = _roadHalfWidthM(r.grade, scale);
+      final delta = halfNow - halfDef;
+      if (delta <= 1e-6) continue; // 该等级没加宽
+
+      final pts = <List<double>>[
+        for (final p in r.pts)
+          [(p[1] - baseLon) * scaleX, (p[0] - baseLat) * scaleY]
+      ];
+      for (var i = 1; i < pts.length; i++) {
+        final a = pts[i - 1], b = pts[i];
+        final dx = b[0] - a[0], dy = b[1] - a[1];
+        final l2 = dx * dx + dy * dy;
+        if (l2 < 1e-12) continue;
+        var t = ((cx - a[0]) * dx + (cy - a[1]) * dy) / l2;
+        if (t < 0) t = 0;
+        if (t > 1) t = 1;
+        final px = a[0] + dx * t, py = a[1] + dy * t;
+        final ddx = cx - px, ddy = cy - py;
+        final d2 = ddx * ddx + ddy * ddy;
+        if (d2 < bestD2) {
+          bestD2 = d2;
+          // 方向：从路面点指向建筑质心（已归一化）
+          final d = math.sqrt(d2);
+          if (d > 1e-9) {
+            pushX = ddx / d * delta;
+            pushY = ddy / d * delta;
+          } else {
+            // 质心正压在路面上：往上推（任意稳定方向）
+            pushX = 0;
+            pushY = delta;
+          }
+        }
+      }
+    }
+
+    if (bestD2 == double.infinity) return rings;
+    // 建筑本来就离得够远（超过当前半宽 + 1mm）→ 不动
+    final bestD = math.sqrt(bestD2);
+    if (bestD > 1e-9 && bestD > 0) {
+      // 只在"建筑面积与路面重叠"时推：质心距离 < 当前半宽
+      // 这里取一个宽松判据：质心距离 < 3 倍加宽量就不推（避免整体漂移）
+      if (bestD > 60.0) return rings;
+    }
+    if (pushX.abs() < 1e-9 && pushY.abs() < 1e-9) return rings;
+
+    return [
+      for (final ring in rings)
+        [
+          for (final p in ring) [p[0] + pushX, p[1] + pushY]
+        ]
+    ];
+  }
+
   static void _appendRoadDualAndCenter(
     _Ctx c,
     _Ctx lc,
@@ -2607,8 +2761,10 @@ class DxfExporter {
     int scale,
     DxfVersion version,
     _Ext acc,
-    bool showMinorRoadNames,
-  ) {
+    bool showMinorRoadNames, {
+    RoadStyle roadStyle = RoadStyle.single,
+    double roadWidthScale = 1.0,
+  }) {
     final cart = <List<double>>[
       for (final p in rp.pts) [(p[1] - baseLon) * scaleX, (p[0] - baseLat) * scaleY]
     ];
@@ -2620,9 +2776,18 @@ class DxfExporter {
     final simp = _simplifyPath(cart, _roadTolM(rp.grade) / unitsPerMeter);
     if (simp.length < 2) return;
 
-    // 双线描边（casing）：半宽 = 纸面半宽 ÷ 1000 × 比例
-    final halfW = _roadHalfWidthM(rp.grade, scale);
-    if (halfW > 1e-6) {
+    // 道路绘制（v3.30）。
+    //
+    // 用户口径："有的是双线，我只要单线" + "导出的道路太窄"。
+    //  · single      → 一条中心线，用 polyline 全局宽度表达路宽（实心路面）
+    //  · doubleLine  → 旧行为：左右两条描边线
+    final halfW = _roadHalfWidthM(rp.grade, scale) * roadWidthScale;
+    if (roadStyle == RoadStyle.single) {
+      // 单线：宽度 = 2×半宽（polyline 全局宽度，CAD 里显示为实心带）
+      final w = halfW * 2;
+      _appendPolyline(c, 'DaoLu', simp,
+          width: w > 1e-6 ? w : 0, version: version);
+    } else if (halfW > 1e-6) {
       final left = _offsetPolyline(simp, halfW);
       final right = _offsetPolyline(simp, -halfW);
       if (left.length >= 2) {

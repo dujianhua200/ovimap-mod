@@ -237,6 +237,7 @@ Future<QaDoc> _exportDoc(
     version: v,
     buildingFill: buildingFill,
     showMinorRoadNames: showMinorRoadNames,
+    roadStyle: RoadStyle.doubleLine,
   );
   // 文件为 GBK 字节；latin1 解码保字节值（组码与数字均为 ASCII，比对不受影响）
   return _parse(String.fromCharCodes(r.file.readAsBytesSync()));

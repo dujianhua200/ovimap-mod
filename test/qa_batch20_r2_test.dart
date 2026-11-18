@@ -236,6 +236,7 @@ void main() {
         labels: r2Labels(),
         includeSurroundings: true,
         rangeM: 300,
+        roadStyle: RoadStyle.doubleLine,
       );
       final text = r2ReadDxf(res.file);
       expect(r2EntitiesOnLayer(text, 'DaoLuBian'), greaterThan(0),

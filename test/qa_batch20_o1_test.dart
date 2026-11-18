@@ -298,6 +298,7 @@ void main() {
       labels: o1Labels(),
       includeSurroundings: true,
       rangeM: 300,
+      roadStyle: RoadStyle.doubleLine,
     );
     final text = o1ReadDxf(res.file);
     expect(o1Entities(text, 'DaoLuBian'), greaterThan(0),

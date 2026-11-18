@@ -173,6 +173,8 @@ void main() {
           labels: labels,
           includeSurroundings: true,
           basemap: bm,
+          // 本用例验证双线描边的半宽（v3.30 默认改单线，这里显式指定）
+          roadStyle: RoadStyle.doubleLine,
           version: DxfVersion.r2000);
       final text = latin1.decode(r.file.readAsBytesSync());
       final casing = _on(_entities(text), 'LWPOLYLINE', 'DaoLuBian');
@@ -357,6 +359,7 @@ void main() {
         includeSurroundings: true,
         basemap: bm,
         version: DxfVersion.r2000,
+        roadStyle: RoadStyle.doubleLine,
         buildingFill: true); // 显式开启：继续覆盖 HATCH 填充路径
     final text = latin1.decode(r.file.readAsBytesSync());
     final ents = _entities(text);
@@ -598,6 +601,7 @@ void main() {
         includeSurroundings: true,
         basemap: bm,
         version: DxfVersion.r2000,
+        roadStyle: RoadStyle.doubleLine,
         buildingFill: true); // 显式开启：HATCH 路径专项覆盖
     final text = latin1.decode(r.file.readAsBytesSync());
     final hatches = _entities(text).where((e) => e.type == 'HATCH').toList();
@@ -833,6 +837,7 @@ void main() {
         includeSurroundings: true,
         basemap: _verifyBasemap(),
         version: DxfVersion.r2000,
+        roadStyle: RoadStyle.doubleLine,
         buildingFill: true); // 显式开启：连同填充一起核查"底图先写、业务后写"
     final ents = _entities(latin1.decode(r.file.readAsBytesSync()));
 

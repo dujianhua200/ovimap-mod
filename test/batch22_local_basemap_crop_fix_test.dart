@@ -158,6 +158,7 @@ void main() {
         name: 'crop_after',
         labels: labels,
         includeSurroundings: true,
+        roadStyle: RoadStyle.doubleLine,
         localBasemap: full,
         rangeM: 50,
       );
@@ -175,6 +176,7 @@ void main() {
         name: 'crop_before',
         labels: labels,
         includeSurroundings: true,
+        roadStyle: RoadStyle.doubleLine,
         basemap: full, // 跳过裁剪 = 旧「回退全量」效果
         rangeM: 50,
       );
@@ -328,6 +330,7 @@ void main() {
         name: 'keep',
         labels: <MapLabel>[_pole(32.1300, 114.0800), _pole(32.1302, 114.0806, 2)],
         includeSurroundings: true,
+        roadStyle: RoadStyle.doubleLine,
         localBasemap: bm,
         rangeM: 300,
       );
@@ -391,6 +394,7 @@ void main() {
         name: 'cap',
         labels: labels,
         includeSurroundings: true,
+        roadStyle: RoadStyle.doubleLine,
         localBasemap: bm,
         localBasemapFeatureCap: 50,
       );
@@ -428,6 +432,7 @@ void main() {
         name: 'real_city',
         labels: labels,
         includeSurroundings: true,
+        roadStyle: RoadStyle.doubleLine,
         localBasemap: bm,
         rangeM: 50,
       );

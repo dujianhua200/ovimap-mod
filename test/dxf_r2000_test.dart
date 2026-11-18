@@ -42,6 +42,7 @@ void main() {
       name: 'R2000测试',
       labels: buildFixtureLabels(),
       includeSurroundings: true,
+      roadStyle: RoadStyle.doubleLine,
       basemap: buildSyntheticBasemap(),
       version: DxfVersion.r2000,
       buildingFill: true, // 显式开启：继续覆盖 HATCH 填充路径
@@ -113,6 +114,7 @@ void main() {
       name: 'R12测试',
       labels: buildFixtureLabels(),
       includeSurroundings: true,
+      roadStyle: RoadStyle.doubleLine,
       basemap: buildSyntheticBasemap(),
       version: DxfVersion.r12,
       buildingFill: true, // 显式开启：继续覆盖 SOLID 三角填充路径
@@ -147,6 +149,7 @@ void main() {
       name: '默认版本',
       labels: buildFixtureLabels(),
       includeSurroundings: true,
+      roadStyle: RoadStyle.doubleLine,
       basemap: buildSyntheticBasemap(),
     );
     final bytes = r.file.readAsBytesSync();
