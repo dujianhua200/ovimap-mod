@@ -691,7 +691,7 @@ void main() {
         includeSurroundings: true,
         basemap: bm,
         version: DxfVersion.r12,
-        roadStyle: RoadStyle.doubleLine,
+        roadStyle: RoadStyle.hollow,
       );
       final dxf = qaReadDxfBytes(res.file);
       expect(qaEntitiesOnLayer(dxf, 'DaoLuBian'), greaterThan(0),
@@ -731,7 +731,7 @@ void main() {
         labels: qaLabels(),
         includeSurroundings: true,
         basemap: bm,
-        roadStyle: RoadStyle.doubleLine,
+        roadStyle: RoadStyle.hollow,
       );
       final text = await _readExported(dir, 'qa20_cache', res);
       expect(qaEntitiesOnLayer(text, 'DaoLuBian'), greaterThan(0));
@@ -756,7 +756,7 @@ void main() {
         includeSurroundings: true,
         rangeM: 300,
         version: DxfVersion.r12,
-        roadStyle: RoadStyle.doubleLine,
+        roadStyle: RoadStyle.hollow,
       );
       final text = await _readExported(dir, 'qa20_fetch', res);
       expect(qaEntitiesOnLayer(text, 'DaoLuBian'), greaterThan(0),
@@ -796,7 +796,7 @@ void main() {
         labels: qaLabels(),
         includeSurroundings: true,
         basemap: bm,
-        roadStyle: RoadStyle.doubleLine,
+        roadStyle: RoadStyle.hollow,
       );
       final text = await _readExported(dir, 'qa20_allfail', res);
       expect(text, isNotEmpty);

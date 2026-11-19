@@ -215,7 +215,7 @@ void main() {
             name: 'qa_local_${v.name}',
             labels: _poles(),
             includeSurroundings: true,
-            roadStyle: RoadStyle.doubleLine,
+            roadStyle: RoadStyle.hollow,
             localBasemap: loaded,
             // 显式给足范围：本用例验「注入的底图能进 DXF」，与 UI 默认范围无关
             // （v3.7.2 起 UI 默认 100m）。

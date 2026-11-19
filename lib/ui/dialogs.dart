@@ -1063,7 +1063,7 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
   // —— 道路样式与宽度（v3.30）——
   var roadStyle = RoadStyle.values.firstWhere(
     (s) => s.name == (prefs.getString('dxfRoadStyle') ?? ''),
-    orElse: () => RoadStyle.single,
+    orElse: () => RoadStyle.hollow,
   );
   var roadWidthScale = prefs.getDouble('dxfRoadWidthScale') ?? 1.0;
 

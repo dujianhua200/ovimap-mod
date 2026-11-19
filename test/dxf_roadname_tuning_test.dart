@@ -179,7 +179,7 @@ Future<String> _exportText(
     showMinorRoadNames: showMinorRoadNames,
     // 本文件验证的是**双线描边**语义（DaoLuBian 几何不被路名过滤影响）。
     // v3.30 起默认改为单线（DaoLu 带宽度），这里显式指定保留原覆盖。
-    roadStyle: RoadStyle.doubleLine,
+    roadStyle: RoadStyle.hollow,
   );
   return latin1.decode(r.file.readAsBytesSync());
 }

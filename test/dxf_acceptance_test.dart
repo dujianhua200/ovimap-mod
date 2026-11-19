@@ -89,7 +89,7 @@ void main() {
       name: '验收样例',
       labels: buildFixtureLabels(),
       includeSurroundings: true,
-      roadStyle: RoadStyle.doubleLine,
+      roadStyle: RoadStyle.hollow,
       basemap: buildSyntheticBasemap(),
       version: DxfVersion.r2000,
       buildingFill: true, // 显式开启：本用例继续断言 HATCH 填充路径正确
@@ -191,7 +191,7 @@ void main() {
       name: '线宽换算',
       labels: labels,
       includeSurroundings: true,
-      roadStyle: RoadStyle.doubleLine,
+      roadStyle: RoadStyle.hollow,
       basemap: bm,
       version: DxfVersion.r2000,
     );
@@ -268,7 +268,7 @@ void main() {
       name: '南北线宽',
       labels: labels,
       includeSurroundings: true,
-      roadStyle: RoadStyle.doubleLine,
+      roadStyle: RoadStyle.hollow,
       basemap: bm,
       version: DxfVersion.r2000,
     );
@@ -317,7 +317,7 @@ void main() {
       name: '失败可见',
       labels: buildFixtureLabels(),
       includeSurroundings: true,
-      roadStyle: RoadStyle.doubleLine,
+      roadStyle: RoadStyle.hollow,
       basemap: failedBm,
       version: DxfVersion.r2000,
     );
@@ -340,7 +340,7 @@ void main() {
       name: 'R12红线',
       labels: buildFixtureLabels(),
       includeSurroundings: true,
-      roadStyle: RoadStyle.doubleLine,
+      roadStyle: RoadStyle.hollow,
       basemap: buildSyntheticBasemap(),
       version: DxfVersion.r12,
     );

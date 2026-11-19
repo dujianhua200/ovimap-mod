@@ -104,7 +104,7 @@ void main() {
   }
 
   Future<String> exportWith({
-    RoadStyle style = RoadStyle.single,
+    RoadStyle style = RoadStyle.solid,
     double widthScale = 1.0,
     DxfVersion ver = DxfVersion.r12,
   }) async {
@@ -122,27 +122,27 @@ void main() {
     return latin1.decode(r.file.readAsBytesSync());
   }
 
-  test('单线：道路画一条 DaoLu，不画 DaoLuBian', () async {
-    final t = await exportWith(style: RoadStyle.single);
+  test('实心：道路画一条带宽度 DaoLu，不画边线', () async {
+    final t = await exportWith(style: RoadStyle.solid);
     final dl = roadPolys(t, 'DaoLu');
     final bian = roadPolys(t, 'DaoLuBian');
     // ignore: avoid_print
-    print('单线: DaoLu=${dl.count} 条(宽 ${dl.widths}), DaoLuBian=${bian.count}');
+    print('实心: DaoLu=${dl.count} 条(宽 ${dl.widths}), DaoLuBian=${bian.count}');
 
     expect(dl.count, 1, reason: '一条道路应只画一条单线');
-    expect(bian.count, 0, reason: '单线模式不应出现双线 DaoLuBian');
+    expect(bian.count, 0, reason: '实心模式不应出现边线 DaoLuBian');
     expect(dl.widths.first, greaterThan(0), reason: '单线应带宽度');
   });
 
-  test('双线：同一条路画左右两条 DaoLuBian', () async {
-    final t = await exportWith(style: RoadStyle.doubleLine);
+  test('空心：同一条路画左右两条边线', () async {
+    final t = await exportWith(style: RoadStyle.hollow);
     final dl = roadPolys(t, 'DaoLu');
     final bian = roadPolys(t, 'DaoLuBian');
     // ignore: avoid_print
-    print('双线: DaoLu=${dl.count}, DaoLuBian=${bian.count}');
+    print('空心: DaoLu=${dl.count}, DaoLuBian=${bian.count}');
 
     expect(bian.count, 2, reason: '左右各一条');
-    expect(dl.count, 0, reason: '双线模式不画中心单线');
+    expect(dl.count, 0, reason: '空心模式不画实心带');
   });
 
   test('线宽倍数真实生效', () async {
@@ -189,7 +189,7 @@ void main() {
         basemap: injected(), includeSurroundings: true, rangeM: 50,
         clipInjectedBasemap: true,
         showLegend: false, showTitleBlock: false, showNorthArrow: false,
-        roadStyle: RoadStyle.single, roadWidthScale: scale,
+        roadStyle: RoadStyle.solid, roadWidthScale: scale,
       );
       final t = latin1.decode(r.file.readAsBytesSync());
       // 收集 JianZhu 多段线的 x（图纸坐标），取点最多的那条的均值

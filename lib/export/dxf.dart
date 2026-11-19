@@ -97,15 +97,19 @@ class _Ctx {
 ///
 /// 用户口径："导出的道路有的是双线，我只要单线"。
 enum RoadStyle {
-  /// 单线 + 可调线宽（用 LWPOLYLINE/POLYLINE 的全局宽度）。
+  /// **空心路幅**：左右两条平行边线，中间不填充（默认）。
   ///
-  /// 图面干净、打印后是实心路面，符合勘察图习惯。
-  single('单线'),
+  /// 这是地形图/工程图里道路的标准画法 —— 用户口径："道路是空心的"。
+  /// 两条线各向外偏移半个路宽，中间留空，能直接看出路有多宽。
+  hollow('空心'),
 
-  /// 左右双线描边（旧行为）。
+  /// **实心带**：一条中心线 + polyline 全局宽度。
   ///
-  /// 两条独立折线勾勒路幅，工程图里常见，但线多、易与小比例尺打架。
-  doubleLine('双线');
+  /// CAD 里显示为实心路面。适合只表达"这里有条路"、不关心路幅细节时。
+  solid('实心'),
+
+  /// 单条零宽细线（纯线条符号，无路幅概念）。
+  hairline('细线');
 
   const RoadStyle(this.label);
   final String label;
@@ -206,12 +210,13 @@ class DxfExporter {
 
     /// 道路绘制方式（v3.30）。
     ///
-    /// 用户口径："有的是双线，我只要单线"。
-    ///  · [RoadStyle.single]  单线 + 可调线宽（默认）
-    ///  · [RoadStyle.doubleLine] 左右双线描边（旧行为）
-    RoadStyle roadStyle = RoadStyle.single,
+    /// 用户口径："道路是空心的"。
+    ///  · [RoadStyle.hollow]   左右两条平行边线、中间空（默认，空心路幅）
+    ///  · [RoadStyle.solid]    一条中心线 + 全局宽度（实心带）
+    ///  · [RoadStyle.hairline] 单条零宽细线
+    RoadStyle roadStyle = RoadStyle.hollow,
 
-    /// 单线道路的**线宽倍数**（v3.30，仅 [RoadStyle.single] 生效）。
+    /// 道路**线宽倍数**（v3.30，空心模式下即两条边线的间距系数）。
     ///
     /// 1.0 = 沿用各等级默认线宽；2.0 = 整体加宽一倍。
     /// 用户："导出的道路太窄" —— 这个旋钮直接给到 UI。
@@ -2530,7 +2535,7 @@ class DxfExporter {
     required bool buildingFill,
     required bool showMinorRoadNames,
     required bool layerPlaces,
-    RoadStyle roadStyle = RoadStyle.single,
+    RoadStyle roadStyle = RoadStyle.hollow,
     double roadWidthScale = 1.0,
   }) {
     final acc = _Ext(double.infinity, double.infinity, -double.infinity,
@@ -2762,7 +2767,7 @@ class DxfExporter {
     DxfVersion version,
     _Ext acc,
     bool showMinorRoadNames, {
-    RoadStyle roadStyle = RoadStyle.single,
+    RoadStyle roadStyle = RoadStyle.hollow,
     double roadWidthScale = 1.0,
   }) {
     final cart = <List<double>>[
@@ -2782,12 +2787,16 @@ class DxfExporter {
     //  · single      → 一条中心线，用 polyline 全局宽度表达路宽（实心路面）
     //  · doubleLine  → 旧行为：左右两条描边线
     final halfW = _roadHalfWidthM(rp.grade, scale) * roadWidthScale;
-    if (roadStyle == RoadStyle.single) {
-      // 单线：宽度 = 2×半宽（polyline 全局宽度，CAD 里显示为实心带）
+    if (roadStyle == RoadStyle.solid) {
+      // 实心带：一条中心线 + 全局宽度
       final w = halfW * 2;
       _appendPolyline(c, 'DaoLu', simp,
           width: w > 1e-6 ? w : 0, version: version);
+    } else if (roadStyle == RoadStyle.hairline) {
+      // 细线：零宽度单线
+      _appendPolyline(c, 'DaoLu', simp, version: version);
     } else if (halfW > 1e-6) {
+      // 空心（默认）：左右两条平行边线，中间不填充
       final left = _offsetPolyline(simp, halfW);
       final right = _offsetPolyline(simp, -halfW);
       if (left.length >= 2) {

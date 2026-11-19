@@ -169,7 +169,7 @@ Future<String> _export(
       name: name,
       labels: labels,
       includeSurroundings: true,
-      roadStyle: RoadStyle.doubleLine,
+      roadStyle: RoadStyle.hollow,
       basemap: bm,
       version: v,
       straightenedWiring: straightened,
@@ -570,7 +570,7 @@ void main() {
         name: 'o2a',
         labels: _poles(kLat, kLon),
         includeSurroundings: true,
-        roadStyle: RoadStyle.doubleLine,
+        roadStyle: RoadStyle.hollow,
         basemap: const BasemapData(
             roads: [], buildings: [], places: [], report: report),
         version: DxfVersion.r2000);
@@ -619,7 +619,7 @@ void main() {
         name: 'o2b',
         labels: _poles(kLat, kLon),
         includeSurroundings: true,
-        roadStyle: RoadStyle.doubleLine,
+        roadStyle: RoadStyle.hollow,
         basemap: const BasemapData(
             roads: [], buildings: [], places: [], report: partial),
         version: DxfVersion.r2000);
