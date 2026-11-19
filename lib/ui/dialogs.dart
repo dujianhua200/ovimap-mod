@@ -1066,6 +1066,9 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
     orElse: () => RoadStyle.hollow,
   );
   var roadWidthScale = prefs.getDouble('dxfRoadWidthScale') ?? 1.0;
+  // 道路总宽度（纸面毫米）。用户口径："路的宽度可以自定义，
+  // 道路的线宽永远是 0.000"。0 = 按等级默认。
+  var roadWidthMm = prefs.getDouble('dxfRoadWidthMm') ?? 0.0;
 
   // —— 图框（用户 DXF，原样搬用，尺寸不变）——
   var useFrame = opt('dxfUseFrame', true);
@@ -1329,25 +1332,26 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
                 const SizedBox(width: 6),
               ],
               const SizedBox(width: 10),
-              const Text('线宽 ×',
+              const Text('宽度(mm)',
                   style: TextStyle(color: kTextSub, fontSize: 12.5)),
               const SizedBox(width: 6),
               SizedBox(
                 width: 70,
                 child: TextFormField(
-                  initialValue: roadWidthScale.toString(),
+                  initialValue:
+                      roadWidthMm > 0 ? roadWidthMm.toString() : '',
                   style: const TextStyle(color: kTextMain, fontSize: 13),
-                  decoration: dec('1.0'),
+                  decoration: dec('按等级'),
                   keyboardType:
                       const TextInputType.numberWithOptions(decimal: true),
-                  onChanged: (v) => roadWidthScale =
-                      (double.tryParse(v.trim()) ?? 1.0).clamp(0.3, 5.0),
+                  onChanged: (v) => roadWidthMm =
+                      (double.tryParse(v.trim()) ?? 0).clamp(0.0, 20.0),
                 ),
               ),
             ]),
           ),
           // 加宽时建筑随之外移的说明
-          if (roadWidthScale > 1.0)
+          if (roadWidthMm > 0 || roadWidthScale > 1.0)
             const Padding(
               padding: EdgeInsets.only(left: 4, bottom: 4),
               child: Text('路加宽后，贴近道路的建筑会自动向外让开相同距离',
@@ -1736,6 +1740,7 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
         prefs.setString('dxfFrameSize', frameSize.name);
         prefs.setString('dxfRoadStyle', roadStyle.name);
         prefs.setDouble('dxfRoadWidthScale', roadWidthScale);
+        prefs.setDouble('dxfRoadWidthMm', roadWidthMm);
         prefs.setInt('dxfLabelColor', labelColor);
         prefs.setInt('dxfDistColor', distColor);
         prefs.setInt('dxfRodColor', rodColor);
@@ -1798,6 +1803,7 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
             // 道路样式与宽度（v3.30）
             roadStyle: roadStyle,
             roadWidthScale: roadWidthScale,
+            roadWidthMm: roadWidthMm > 0 ? roadWidthMm : null,
           );
           if (context.mounted) {
             // 非致命警告 / 底图三态结构化说明（文件仍正常分享）

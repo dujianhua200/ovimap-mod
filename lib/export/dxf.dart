@@ -221,6 +221,12 @@ class DxfExporter {
     /// 1.0 = 沿用各等级默认线宽；2.0 = 整体加宽一倍。
     /// 用户："导出的道路太窄" —— 这个旋钮直接给到 UI。
     double roadWidthScale = 1.0,
+
+    /// **道路总宽度（纸面毫米）**。给了就用它，不再按等级推算。
+    ///
+    /// 用户口径："路的宽度可以自定义，道路的线宽永远是 0.000"。
+    /// 空心模式下两条边线各偏移本值的一半；线宽组码一律不写（=0.000）。
+    double? roadWidthMm,
   }) async {
     final warnings = <String>[];
     final dir = await LabelStore.instance.exportDir();
@@ -459,6 +465,7 @@ class DxfExporter {
         layerPlaces: layerPlaces,
         roadStyle: roadStyle,
         roadWidthScale: roadWidthScale,
+        roadWidthMm: roadWidthMm,
       );
       if (ext != null) {
         if (ext[0] < extMinX) extMinX = ext[0];
@@ -2537,6 +2544,12 @@ class DxfExporter {
     required bool layerPlaces,
     RoadStyle roadStyle = RoadStyle.hollow,
     double roadWidthScale = 1.0,
+
+    /// **道路总宽度（纸面毫米）**。给了就用它，不再按等级推算。
+    ///
+    /// 用户口径："路的宽度可以自定义，道路的线宽永远是 0.000"。
+    /// 空心模式下两条边线各偏移本值的一半；线宽组码一律不写（=0.000）。
+    double? roadWidthMm,
   }) {
     final acc = _Ext(double.infinity, double.infinity, -double.infinity,
         -double.infinity);
@@ -2614,7 +2627,8 @@ class DxfExporter {
       for (final r in bm.roads) {
         _appendRoadDualAndCenter(c, lc, r, baseLon, baseLat, scaleX,
             scaleY, scale, version, acc, showMinorRoadNames,
-            roadStyle: roadStyle, roadWidthScale: roadWidthScale);
+            roadStyle: roadStyle, roadWidthScale: roadWidthScale,
+            roadWidthMm: roadWidthMm);
       }
     }
 
@@ -2769,6 +2783,12 @@ class DxfExporter {
     bool showMinorRoadNames, {
     RoadStyle roadStyle = RoadStyle.hollow,
     double roadWidthScale = 1.0,
+
+    /// **道路总宽度（纸面毫米）**。给了就用它，不再按等级推算。
+    ///
+    /// 用户口径："路的宽度可以自定义，道路的线宽永远是 0.000"。
+    /// 空心模式下两条边线各偏移本值的一半；线宽组码一律不写（=0.000）。
+    double? roadWidthMm,
   }) {
     final cart = <List<double>>[
       for (final p in rp.pts) [(p[1] - baseLon) * scaleX, (p[0] - baseLat) * scaleY]
@@ -2786,7 +2806,10 @@ class DxfExporter {
     // 用户口径："有的是双线，我只要单线" + "导出的道路太窄"。
     //  · single      → 一条中心线，用 polyline 全局宽度表达路宽（实心路面）
     //  · doubleLine  → 旧行为：左右两条描边线
-    final halfW = _roadHalfWidthM(rp.grade, scale) * roadWidthScale;
+    // 路宽来源优先级：显式 roadWidthMm > 等级默认 × roadWidthScale
+    final halfW = roadWidthMm != null
+        ? _mmOf(roadWidthMm, scale) / 2
+        : _roadHalfWidthM(rp.grade, scale) * roadWidthScale;
     if (roadStyle == RoadStyle.solid) {
       // 实心带：一条中心线 + 全局宽度
       final w = halfW * 2;
