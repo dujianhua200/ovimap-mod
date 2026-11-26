@@ -17,8 +17,8 @@ Map<String, dynamic> _way(
 }
 
 void main() {
-  test('N1：仅丢弃无名 footway/steps/cycleway/pedestrian/bridleway；'
-      '无名 service/track/path/residential 保留', () {
+  test('N1（v3.34 口径）：全等级保留，仅丢弃 steps/bridleway/construction/'
+      'proposed/raceway；无名小路也留几何', () {
     final json = jsonEncode({
       'elements': [
         _way([
@@ -51,10 +51,15 @@ void main() {
       ]
     });
     final roads = OverpassClient.parseRoads(json);
-    expect(roads.length, 4);
-    // service 与 track 均归 RoadGrade.service，且两者均为无名——必须保留（N1 修复）
-    expect(roads.where((r) => r.grade == RoadGrade.service).length, 2,
-        reason: '无名 service/track 内部路网应保留');
+    // 6 条 way：steps 被丢弃（进出图只是噪声），其余 5 条（含无名 footway）全部保留
+    expect(roads.length, 5, reason: 'steps 丢弃，其余全等级保留');
+    expect(roads.any((r) => r.name == '小区步道' && r.grade == RoadGrade.service),
+        isTrue, reason: 'footway 归 service，且有名保留');
+    // service / track / 无名 footway / 有名 footway 都归 service
+    expect(roads.where((r) => r.grade == RoadGrade.service).length, 4,
+        reason: 'service/track/footway 内部路网应保留（v3.34 全等级口径）');
+    expect(roads.where((r) => (r.name ?? '').isEmpty).length, 3,
+        reason: '无名 service/track/footway 保留几何，只是不标名');
     expect(roads.any((r) => r.name == '人民路' && r.grade == RoadGrade.primary),
         isTrue);
     expect(roads.any((r) => r.name == '小区步道'), isTrue);
