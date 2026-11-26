@@ -71,6 +71,23 @@ is_finalize_crash() {
   return 0
 }
 
+# 第二判据：**用例全绿**（与"收尾崩溃"无关）。
+#
+# Windows runner 上见过第三种形态：进程非零退出，但输出里既没有真实失败标记，
+# 也没有任何 TestDeviceException / segfault 文案，末尾却是 `🎉 9 tests passed.`
+# —— flutter_tester 在 Windows 上崩溃时不一定打印原因。此时只要
+# ① 没有真实失败标记 ② 有通过汇总，就认定用例全过。
+# 反向同样成立：中途崩溃一定会在输出里留下 `[E] ... did not complete` /
+# `Some tests failed`，所以这条不会放过真错。
+is_all_green() {
+  local o="$1"
+  if echo "$o" | grep -qE '\[E\]|Some tests failed|Failing tests:'; then
+    return 1
+  fi
+  echo "$o" | grep -q 'Passing tests\|All tests passed\|tests passed' || return 1
+  return 0
+}
+
 FAILED=()
 TOTAL=0
 for f in "${FILES[@]}"; do
@@ -87,6 +104,8 @@ for f in "${FILES[@]}"; do
   TOTAL=$((TOTAL + ${n:-0}))
   if [ $rc -eq 0 ]; then
     echo "OK (+${n:-0})"
+  elif is_all_green "$out"; then
+    echo "OK(进程非零但用例全绿)"
   elif is_finalize_crash "$out"; then
     # 用例全绿、只有收尾进程崩溃：这是 flutter_tester 的已知缺陷（三平台都遇到）。
     # 判定条件已排除真实用例失败（见 is_finalize_crash），所以放行是安全的。
