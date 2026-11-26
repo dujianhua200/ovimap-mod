@@ -185,11 +185,14 @@ jobs:
         # 一遍约 1 分钟，代价可忽略；而手动单独跑本 workflow 时不会有别的门禁，
         # 不跑就等于把没测过的代码签进发布包，不值当。
         #
-        # 至多一次重试：挡 flutter_tester 收尾偶发崩溃（见 ci.yml 同步骤注释）。
-        run: |
-          flutter test && exit 0
-          echo "::warning::第一次运行非零退出 —— 重试一次；若两次都红则是真失败"
-          flutter test
+        # 与桌面/门禁同一口径：逐文件独立进程（scripts/run_tests_isolated.sh）。
+        # 直接 `flutter test` 在本项目并不可靠：大量用例依赖进程级静态状态
+        # （AppPaths 缓存 / 单例 / 磁盘缓存），且 flutter_tester 收尾 segfault
+        # 会让"用例全绿"的进程返回非零 —— v3.34 实测两次重试仍然红。
+        # 一文件一进程把这两类问题一起消掉；--retry 只吸收收尾崩溃，
+        # 真实断言失败（日志带 [E]）照样判红。
+        shell: bash
+        run: bash scripts/run_tests_isolated.sh --retry
 
       - name: 构建 Release APK（universal）
         run: flutter build apk --release --build-name=$BUILD_NAME --build-number=$BUILD_NUMBER
