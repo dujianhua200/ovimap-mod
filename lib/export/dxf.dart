@@ -892,14 +892,20 @@ class DxfExporter {
     // 图签要落在格子的几何正中，不能再叠 0.35h 的基线补偿 ——
     // 那个补偿是给"压在线条上"的标注用的。图签用它会整体下沉
     // 1.0~1.6 个单位，正是用户说的"字老错行，没在表格内"。
-    final yAdj = (centered && !vCenterExact)
-        ? y - h * 0.35 + h * (liftAboveLine ? 0.95 : 0)
-        : y;
+    // v3.33：垂直补偿必须沿**文字法线**方向施加。
+    // 旧实现直接改世界 Y，文字旋转后补偿量变成斜向/横向位移，
+    // 正是倾斜路名、段标“字体偏移、不协调”的根因。
+    final dOff = (centered && !vCenterExact)
+        ? -h * 0.35 + h * (liftAboveLine ? 0.95 : 0)
+        : 0.0;
+    final rad = (angle ?? 0) * math.pi / 180;
+    final xAdj = x - math.sin(rad) * dOff;
+    final yAdj = y + math.cos(rad) * dOff;
 
     c.ent('TEXT', layer, 'AcDbText');
     if (sn != null) c.sb.write('7\n$sn\n');
     c.sb.write(
-        '10\n${_fmt(x)}\n20\n${_fmt(yAdj)}\n30\n0\n40\n${_fmt(h)}\n');
+        '10\n${_fmt(xAdj)}\n20\n${_fmt(yAdj)}\n30\n0\n40\n${_fmt(h)}\n');
     if (angle != null) c.sb.write('50\n${angle.toStringAsFixed(1)}\n');
 
     // **文本值必须先写**（v3.21 修）。
@@ -916,7 +922,7 @@ class DxfExporter {
       // 只给水平居中（72=1），对齐点与插入点一致。
       // 不写 73：避免各 CAD 对"垂直居中"理解不一致导致偏移。
       c.sb.write('72\n1\n');
-      c.sb.write('11\n${_fmt(x)}\n21\n${_fmt(yAdj)}\n31\n0\n');
+      c.sb.write('11\n${_fmt(xAdj)}\n21\n${_fmt(yAdj)}\n31\n0\n');
     }
     if (c.r2000) c.sb.write('100\nAcDbText\n');
   }
@@ -2355,13 +2361,9 @@ class DxfExporter {
   static void _appendTextCentered(_Ctx c, String layer,
       double cx, double cy, double h, String text, {bool style = true}) {
     if (text.isEmpty) return;
-    var w = 0.0;
-    for (final r in text.runes) {
-      w += r > 0x2E7F ? h : h * 0.55;
-    }
-    // **必须显式指定样式**：默认 Standard 是 txt.shx（纯西文 SHX），
-    // 中文会显示成问号/乱码。用户反馈"里面的字体都是乱码"即此。
-    _text(c, layer, cx - w / 2, cy - h * 0.35, h, text, style: style);
+    // 不再按估算字宽手工左移（中英混排、不同字体下估算误差大，导致地名偏移）：
+    // 交给 CAD 用 72=1 精确水平居中，垂直方向由 _text 统一做 0.35h 基线补偿。
+    _text(c, layer, cx, cy, h, text, style: style, centered: true);
   }
 
   // ---- 通用 ----
