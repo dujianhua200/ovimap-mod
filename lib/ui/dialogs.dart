@@ -1048,6 +1048,10 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
   // 默认 **沿线 50m**（线路设计口径：用户明确"轨迹附近 50 米就好"）。
   // 原默认 880m → 100m → 现在 50m；用户手选过的值仍按记忆走。
   var rangeM = prefs.getDouble('dxfRangeM') ?? 50;
+  // **底图覆盖口径（v3.34）**
+  // true  = 整幅图框（默认）：图框内整幅图都有底图，这是商业出图口径；
+  // false = 沿线走廊：只看杆路两侧 rangeM 米（旧口径，出图会大面积空白）。
+  var coverageFrame = opt('dxfCoverageFrame', true);
   final corridorCtl =
       TextEditingController(text: prefs.getString('dxfCorridor') ?? '0');
 
@@ -1121,9 +1125,17 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
     probeError = '';
     refreshUi(() {});
     try {
+      // 探测与正式导出同一覆盖口径，否则"抓到了多少"和"导出了多少"对不上。
+      final probeFrame = useFrame ? await FrameLibrary.load(frameSize) : null;
+      final probeBbox = coverageFrame
+          ? DxfExporter.coverageBboxFor(
+              labels, probeFrame, fixedScale > 0 ? fixedScale : 3000)
+          : null;
       final data = await BasemapFetcher.fetchFor(
         labels,
         rangeM: rangeM,
+        bboxOverride: probeBbox,
+        corridorMode: probeBbox == null,
         tdtKey: tdtKey,
         amapKey: amapKey,
         overpassEndpoints: overpassEndpoints,
@@ -1581,7 +1593,7 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
               alignment: Alignment.centerLeft,
               child: Padding(
                 padding: const EdgeInsets.only(left: 16, top: 6, bottom: 2),
-                child: Text('底图范围（线路外扩）',
+                child: Text('底图覆盖范围',
                     style: TextStyle(color: kTextSub, fontSize: 11)),
               ),
             ),
@@ -1592,6 +1604,18 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
                 child: Wrap(
                   spacing: 8,
                   children: [
+                    ChoiceChip(
+                      label: Text('整幅图框（推荐）',
+                          style: const TextStyle(fontSize: 12)),
+                      selected: coverageFrame,
+                      onSelected: (_) => setSt(() => coverageFrame = true),
+                    ),
+                    ChoiceChip(
+                      label: Text('沿线走廊',
+                          style: const TextStyle(fontSize: 12)),
+                      selected: !coverageFrame,
+                      onSelected: (_) => setSt(() => coverageFrame = false),
+                    ),
                     for (final r in rangeOptions)
                       ChoiceChip(
                         label: Text('${r.toInt()}m',
@@ -1731,6 +1755,7 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
         prefs.setBool('dxfTdtFallback', tdtFallback);
         prefs.setBool('dxfUseLocal', useLocal);
         prefs.setDouble('dxfRangeM', rangeM);
+        prefs.setBool('dxfCoverageFrame', coverageFrame);
         // 出图口径：记住比例 / 线宽 / 是否写名称
         prefs.setInt('dxfFixedScale', fixedScale);
         prefs.setDouble('dxfRodWidthMm', rodWidthMm);
@@ -1764,6 +1789,9 @@ Future<void> showDxfOptions(BuildContext context, List<MapLabel> labels,
             straightenedWiring: straightened,
             version: version,
             rangeM: rangeM,
+            coverage: coverageFrame
+                ? BasemapCoverage.frame
+                : BasemapCoverage.corridor,
             layerRoads: layerRoads,
             layerBuildingOutline: layerBldOutline,
             buildingFill: layerBldFill,

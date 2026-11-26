@@ -257,7 +257,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('B. 路名在双线之间（几何对抗）', () {
-    test('1000m 水平 trunk 路：恰 5 处、x≈100/300/500/700/900、y=0、h=clamp、SongTi、不倒立',
+    test('1000m 水平 trunk 路：恰 5 处、x≈100/300/500/700/900、骑路面上方、h 固定、SongTi、不倒立',
         () async {
       final dir = Directory.systemTemp.createTempSync('qa_h1000');
       final doc = await _exportDoc(
@@ -277,13 +277,16 @@ void main() {
       for (final t in texts) {
         final y = _d(t.first('20'));
         final h = _d(t.first('40'));
-        expect(y.abs(), lessThanOrEqualTo(halfW + _mToUnits(1e-6)),
-            reason: '水平路 TEXT y 应落中心线（偏差≤halfW=$halfW）');
-        expect(y.abs(), lessThanOrEqualTo(0.01), reason: '水平路 y 应严格=0');
-        expect(h, closeTo(_clampH(RoadGrade.trunk), 1e-6),
-            reason: 'trunk clamp 字高应=${_clampH(RoadGrade.trunk)}');
-        expect(h, lessThanOrEqualTo(2 * halfW * 0.6 + 1e-6),
-            reason: '字高必须塞进双线间隙');
+        // v3.34：字高按等级固定，不再 clamp；位置沿法线外移 halfW+0.7h。
+        // 注：dxf.dart 的 _mmOf 为恒等映射，纸面 mm 数值直接就是图纸单位。
+        const unitsPerMm = 1.0;
+        final expectH = 2.0 * unitsPerMm;
+        final expectOff = _halfWmm(RoadGrade.trunk) * unitsPerMm + 0.7 * expectH;
+        expect(h, closeTo(expectH, 1e-6), reason: 'trunk 字高应固定 $expectH');
+        expect(h, greaterThan(2 * halfW * 0.6),
+            reason: '字高不再被 clamp 进双线间隙');
+        expect(y.abs(), closeTo(expectOff, 0.01),
+            reason: '路名应骑在路面上方 |y|=$expectOff，实测 ${y.abs()}');
         expect(t.first('7'), 'SongTi', reason: '路名样式应为 SongTi');
         final ang = t.first('50') == null ? 0.0 : _d(t.first('50'));
         expect(_readableAngle(ang), isTrue, reason: '旋转 $ang 不得倒立');
@@ -291,7 +294,7 @@ void main() {
       dir.deleteSync(recursive: true);
     }, timeout: const Timeout(Duration(minutes: 2)));
 
-    test('600m 斜向路（30°）：3 处、垂距=0（落中心线）、旋转=30°', () async {
+    test('600m 斜向路（30°）：3 处、垂距=halfW+0.7h、旋转=30°', () async {
       final dir = Directory.systemTemp.createTempSync('qa_diag');
       final doc =
           await _exportDoc(dir, _bm([_diagRoad('DIAG30', RoadGrade.primary, 600, 30)]));
@@ -314,9 +317,13 @@ void main() {
         // 点到过 (sx,sy) 方向 (cos,sin) 直线的垂距
         final vx = px - sx, vy = py - sy;
         final perp = (vx * math.sin(rad) - vy * math.cos(rad)).abs();
-        expect(perp, lessThanOrEqualTo(_halfWm(RoadGrade.primary) + _mToUnits(1e-3)),
-            reason: '斜路 TEXT 应落在双线之间（垂距≤halfW）');
-        expect(perp, lessThanOrEqualTo(_mToUnits(0.05)), reason: '垂距应≈0（在中心线上）');
+        // v3.34：斜路路名沿法线外移 halfW+0.7h（单位由实际字高反推）
+        final hNow = _d(t.first('40'));
+        final unitsPerMm = hNow / 1.9;
+        final expectOffp =
+            _halfWmm(RoadGrade.primary) * unitsPerMm + 0.7 * hNow;
+        expect(perp, closeTo(expectOffp, 0.02),
+            reason: '斜路 TEXT 垂距应为 halfW+0.7h=$expectOffp，实测 $perp');
         final along = vx * math.cos(rad) + vy * math.sin(rad);
         expect(along, greaterThan(0), reason: '沿线正向');
         expect(along, lessThan(len + 1), reason: '沿线范围内');
@@ -324,7 +331,8 @@ void main() {
         expect(ang, closeTo(30.0, 0.2), reason: '斜路旋转应=30°');
         expect(_readableAngle(ang), isTrue);
         expect(t.first('7'), 'SongTi');
-        expect(_d(t.first('40')), closeTo(_clampH(RoadGrade.primary), 1e-6));
+        expect(hNow, closeTo(1.9 * unitsPerMm, 1e-6),
+            reason: 'primary 字高固定 1.9mm');
       }
       // 均布位置：n=3 → 弧长 100/300/500
       final alongs = texts
@@ -455,22 +463,19 @@ void main() {
       expect(minor.polysOn('DaoLuBian').length, 14,
           reason: '等级过滤只作用于文字，DaoLuBian 实体数不得变化');
 
-      // 各等级字高都塞得进各自双线间隙（④ 字号和谐 + clamp）
-      final expectH = {
-        'TRK': _clampH(RoadGrade.trunk),
-        'PRI': _clampH(RoadGrade.primary),
-        'SEC': _clampH(RoadGrade.secondary),
-        'TER': _clampH(RoadGrade.tertiary),
-        'RES': _clampH(RoadGrade.residential),
-        'SVC': _clampH(RoadGrade.service),
-        'OTH': _clampH(RoadGrade.other),
+      // v3.34：各等级字高按等级固定（不再 clamp 进双线间隙）
+      const fontMm = {
+        'TRK': 2.0, 'PRI': 1.9, 'SEC': 1.7, 'TER': 1.5,
+        'RES': 1.3, 'SVC': 1.0, 'OTH': 1.0,
       };
+      final trk = minor.on('TEXT', 'DaoLu')
+          .firstWhere((t) => t.first('1') == 'TRK');
+      // 用 trunk 的实际字高反推"1 纸面毫米 = 多少图纸单位"，避免依赖比例常量
+      final unitsPerMm = _d(trk.first('40')) / fontMm['TRK']!;
       for (final t in minor.on('TEXT', 'DaoLu')) {
         final n = t.first('1')!;
-        expect(_d(t.first('40')), closeTo(expectH[n]!, 1e-6),
-            reason: '$n 字高应=clamp(${expectH[n]!.toStringAsFixed(3)})');
-        expect(_d(t.first('40')), lessThanOrEqualTo(2 * _halfWm(RoadGrade.values.first) * 0.6 + 1),
-            reason: '字高 sanity');
+        expect(_d(t.first('40')), closeTo(fontMm[n]! * unitsPerMm, 1e-6),
+            reason: '$n 字高应按等级固定 ${fontMm[n]}mm');
       }
       dir.deleteSync(recursive: true);
     }, timeout: const Timeout(Duration(minutes: 3)));

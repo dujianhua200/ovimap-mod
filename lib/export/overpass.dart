@@ -414,17 +414,23 @@ class OverpassClient {
 
   // ---- 纯解析 ----
 
-  /// 解析道路。**N1 修复**：仅丢弃**无名**的
-  /// `footway/steps/cycleway/pedestrian/bridleway`；**无名 service/track/path/
-  /// residential/... 一律保留**（小区内部路网），不再出现"丢弃又赋宽"的死逻辑。
+  /// 解析道路。
+  ///
+  /// **全等级保留（v3.34 重做）**：现场需要的是"图面路网完整"——
+  /// 田间路、机耕道、村道、厂区内部路、小路都要出现，否则图面一大片空白，
+  /// 用户看到的就是"很多道路没有"。
+  ///
+  /// 只丢弃**明确不是通行路**的类别：`steps`（台阶）、`bridleway`（马道）、
+  /// `construction/proposed`（在建/规划，几何多半不存在）。
+  /// 无名道路**一律保留几何**（只是不标注路名），不再因"没名字"被整条删掉。
   static List<RoadPoly> parseRoads(String json) {
     final list = <RoadPoly>[];
     final seen = <String>{};
     final root = jsonDecode(json) as Map<String, dynamic>;
     final elements = root['elements'] as List?;
     if (elements == null) return list;
-    const dropWhenUnnamed = <String>{
-      'footway', 'steps', 'cycleway', 'pedestrian', 'bridleway'
+    const dropAlways = <String>{
+      'steps', 'bridleway', 'construction', 'proposed', 'raceway',
     };
     for (final el in elements.cast<Map<String, dynamic>>()) {
       final geom = el['geometry'] as List?;
@@ -438,15 +444,25 @@ class OverpassClient {
       }
       final tags = (el['tags'] as Map?)?.cast<String, dynamic>() ?? {};
       final hw = (tags['highway'] as String?) ?? '';
-      final name = (tags['name'] as String?) ?? '';
-      if (name.isEmpty && dropWhenUnnamed.contains(hw)) continue;
+      if (hw.isEmpty || dropAlways.contains(hw)) continue;
+      // 中文名优先：`name:zh` / `name:zh-Hans` → `name`（国产底图常见写法）
+      final name = _tagName(tags);
+      // 去重：同名 + 首尾点近似相同视为重复；无名道路用首尾点做键
+      final key = '${name.isEmpty ? '-' : name}|${_qk(pts.first)}|${_qk(pts.last)}';
+      if (!seen.add(key)) continue;
       final grade = gradeOf(hw);
-      // 去重：同名 + 首尾点近似相同视为重复
-      final key = '$name|${_qk(pts.first)}|${_qk(pts.last)}';
-      if (name.isNotEmpty && !seen.add(key)) continue;
       list.add(RoadPoly(pts, grade, name));
     }
     return list;
+  }
+
+  /// 名称取值：优先中文标签，回退 `name`。
+  static String _tagName(Map<String, dynamic> tags) {
+    for (final k in const ['name:zh', 'name:zh-Hans', 'name:zh-CN', 'name']) {
+      final v = (tags[k] as String?)?.trim() ?? '';
+      if (v.isNotEmpty) return v;
+    }
+    return '';
   }
 
   /// `highway` 标签 → [RoadGrade]（含 `*_link` 归入上级）。
@@ -473,6 +489,9 @@ class OverpassClient {
       case 'service':
       case 'track':
       case 'path':
+      case 'footway':
+      case 'pedestrian':
+      case 'living_street_link':
         return RoadGrade.service;
       default:
         return RoadGrade.other;
@@ -516,7 +535,8 @@ class OverpassClient {
         final innerRings = _stitchRings(innerSegs);
         for (final ring in outerRings) {
           if (ring.length < 3) continue;
-          if (name.isEmpty && _ringSpanM(ring) < 4) continue;
+          // 极小的附属footprint（<6 ㎡，如设备箱、雨棚）不入图；其余全部保留
+          if (_ringAreaM2(ring) < 6) continue;
           final holes = <List<List<double>>>[];
           for (final h in innerRings) {
             if (h.length >= 3 && _pointInRing(_centroid(h), ring)) holes.add(h);
@@ -534,7 +554,7 @@ class OverpassClient {
           ]);
         }
         if (ring.length < 3) continue;
-        if (name.isEmpty && _ringSpanM(ring) < 4) continue;
+        if (_ringAreaM2(ring) < 6) continue;
         out.add(BuildingPoly([ring], name));
       }
     }
@@ -550,7 +570,8 @@ class OverpassClient {
     if (elements == null) return out;
     for (final el in elements.cast<Map<String, dynamic>>()) {
       final tags = (el['tags'] as Map?)?.cast<String, dynamic>() ?? {};
-      final name = (tags['name'] as String?) ?? '';
+      // 中文名优先，避免"村庄名字经常没有"：很多要素只有 name:zh 或 old_name
+      final name = _tagName(tags);
       if (name.isEmpty) continue;
       double? lat, lon;
       if (el['lat'] != null && el['lon'] != null) {
@@ -605,6 +626,12 @@ class OverpassClient {
         return PlaceLevel.village;
       case 'hamlet':
         return PlaceLevel.hamlet;
+      // 乡村散居点、自然村、地块名 —— 中原/山区最常见的"村名"来源
+      case 'isolated_dwelling':
+      case 'locality':
+      case 'allotments':
+      case 'farm':
+        return PlaceLevel.hamlet;
       case 'residential':
         return PlaceLevel.residential;
       default:
@@ -656,18 +683,23 @@ class OverpassClient {
       (a[0] - b[0]).abs() <= tol && (a[1] - b[1]).abs() <= tol;
 
   /// 环的最大跨度（米），用于丢弃无名的极小碎片。
-  static double _ringSpanM(List<List<double>> ring) {
-    var minLat = 90.0, maxLat = -90.0, minLon = 180.0, maxLon = -180.0;
-    for (final p in ring) {
-      if (p[0] < minLat) minLat = p[0];
-      if (p[0] > maxLat) maxLat = p[0];
-      if (p[1] < minLon) minLon = p[1];
-      if (p[1] > maxLon) maxLon = p[1];
+
+  /// 环的实地面积（㎡，局部平面近似；只用于过滤极小 footprint）。
+  static double _ringAreaM2(List<List<double>> ring) {
+    if (ring.length < 3) return 0;
+    final cosLat =
+        math.cos(ring.first[0] * math.pi / 180).abs().clamp(1e-6, 1.0);
+    var sum = 0.0;
+    for (var i = 0; i < ring.length; i++) {
+      final a = ring[i];
+      final b = ring[(i + 1) % ring.length];
+      final ax = a[1] * 111320.0 * cosLat, ay = a[0] * 110540.0;
+      final bx = b[1] * 111320.0 * cosLat, by = b[0] * 110540.0;
+      sum += ax * by - bx * ay;
     }
-    final w = (maxLon - minLon) * 111320 * math.cos(minLat * math.pi / 180).abs();
-    final h = (maxLat - minLat) * 110540;
-    return math.max(w, h);
+    return sum.abs() / 2.0;
   }
+
 
   /// 环几何中心（顶点平均）。
   static List<double> _centroid(List<List<double>> ring) {

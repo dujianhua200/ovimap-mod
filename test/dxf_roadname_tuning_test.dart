@@ -244,7 +244,7 @@ void main() {
   // ==========================================================================
   // ① 路名在双线之间：TEXT y 与中线重合（|y| ≤ halfW），字号 ≤ 2*halfW*0.6
   // ==========================================================================
-  test('路名 TEXT 落在道路中心线上（双线之间），字号被 clamp 进双线间隙', () async {
+  test('v3.34：路名骑在路面上方（halfW+0.7h），字号按等级固定不再 clamp', () async {
     final dir = Directory.systemTemp.createTempSync('tune_center');
     final bm = _bm([_hRoad(RoadGrade.trunk, '验收大道', kLon - 0.001, kLon + 0.004)]);
     final text = await _exportText(dir, bm, name: '路名居中');
@@ -256,11 +256,12 @@ void main() {
     for (final t in texts) {
       final y = double.parse(t.first('20')!);
       final h = double.parse(t.first('40')!);
-      expect(y.abs(), lessThanOrEqualTo(halfW + 1e-6),
-          reason: '路名 y=$y 超出双线之间（±$halfW）');
-      expect(h, lessThanOrEqualTo(2 * halfW * 0.6 + 1e-6),
-          reason: '字号 h=$h 未被 clamp 进双线间隙');
-      expect(h, greaterThan(0));
+      // 1:1000 下 1 纸面毫米 = 1 图纸单位：trunk 字高 2.0
+      expect(h, closeTo(2.0, 1e-6), reason: '字高应按等级固定为 2.0，不再 clamp');
+      expect(h, greaterThan(2 * halfW * 0.6),
+          reason: '字高必须大于旧 clamp 上限（不再塞进双线间隙）');
+      expect(y.abs(), closeTo(halfW + 0.7 * h, 1e-3),
+          reason: '路名应骑在路面上方：|y| = halfW + 0.7h，实测 ${y.abs()}');
     }
     dir.deleteSync(recursive: true);
   }, timeout: const Timeout(Duration(minutes: 2)));
@@ -275,11 +276,14 @@ void main() {
 
     final xs = texts.map((t) => double.parse(t.first('10')!)).toList()..sort();
     final ys = texts.map((t) => double.parse(t.first('20')!)).toList();
+    const halfw1k = 0.90; // 1:1000 下 trunk 半宽（纸面毫米=图纸单位）
     // 均匀分布：第 i 处在弧长 1000*(2i-1)/(2*5) = 100,300,...,900
     for (var i = 0; i < xs.length; i++) {
       expect(xs[i], closeTo(100.0 + 200.0 * i, 0.01),
           reason: '第 ${i + 1} 处应在弧长 ${100 + 200 * i}m，实测 ${xs[i]}');
-      expect(ys[i], closeTo(0, 1e-6), reason: '应落在中心线上');
+      // v3.34：路名沿法线整体上移，y 不再是 0，而是 ±(halfW + 0.7h)
+      expect(ys[i].abs(), closeTo(halfw1k + 0.7 * 2.0, 1e-3),
+          reason: '路名应骑在路面上方（halfW+0.7h）');
     }
     dir.deleteSync(recursive: true);
   }, timeout: const Timeout(Duration(minutes: 2)));
@@ -363,7 +367,7 @@ void main() {
     dir.deleteSync(recursive: true);
   }, timeout: const Timeout(Duration(minutes: 2)));
 
-  test('极窄路（other 级）默认无路名；放开后字号被 clamp 进窄间隙（塞不下不硬塞）', () async {
+  test('v3.34 极窄路（other 级）默认无路名；放开后字号固定、骑在路面上方', () async {
     final dir = Directory.systemTemp.createTempSync('tune_narrow');
     final bm = _bm([_hRoad(RoadGrade.other, '窄巷', kLon, kLon + 0.003)]);
 
@@ -372,18 +376,17 @@ void main() {
     expect(_on(_entities(tDef), 'TEXT', 'DaoLu'), isEmpty,
         reason: 'other 级道路默认不应标注路名');
 
-    // 放开：标注存在，但字号必须 clamp 进双线间隙（other 半宽 0.20mm，v3.9.5 加倍）
+    // 放开：标注存在；字号按等级固定（other=1.0mm），注记骑在路面上方
     final tAll = await _exportText(dir, bm, showMinorRoadNames: true, name: '窄路放开');
     final texts = _on(_entities(tAll), 'TEXT', 'DaoLu');
     expect(texts, isNotEmpty);
-    const halfW = 0.20 / 1000.0 * 1000; // other 半宽（米，比例 1:1000；v3.9.5 加倍）
+    const halfW = 0.20; // other 半宽（1:1000 下 0.20mm = 0.20 图纸单位）
     for (final t in texts) {
       final y = double.parse(t.first('20')!);
       final h = double.parse(t.first('40')!);
-      expect(y.abs(), lessThanOrEqualTo(halfW + 1e-6),
-          reason: '窄路路名 y=$y 超出双线之间');
-      expect(h, lessThanOrEqualTo(2 * halfW * 0.6 + 1e-6),
-          reason: '窄路字号 h=$h 未被 clamp');
+      expect(h, closeTo(1.0, 1e-6), reason: 'other 字高固定 1.0mm');
+      expect(y.abs(), closeTo(halfW + 0.7 * h, 1e-3),
+          reason: '窄路路名应骑在路面上方（halfW+0.7h），实测 ${y.abs()}');
     }
     dir.deleteSync(recursive: true);
   }, timeout: const Timeout(Duration(minutes: 2)));

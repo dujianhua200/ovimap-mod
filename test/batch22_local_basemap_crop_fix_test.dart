@@ -399,7 +399,12 @@ void main() {
         localBasemapFeatureCap: 50,
       );
       final e = _parse(gbk_bytes.decode(r.file.readAsBytesSync()));
-      expect(_cnt(e, 'DiMing'), 50, reason: '应被截断到注入上限 50');
+      // 上限截断仍在（不会全量灌入）；v3.34 起地名要过注记避让，
+      // 本用例 200 个地名挤在 ~1m 范围内，能落纸的只有寥寥几条，
+      // 因此只断言「不超过注入上限且确有输出」。
+      final n = _cnt(e, 'DiMing');
+      expect(n, lessThanOrEqualTo(50), reason: '不应超过注入上限 50，实测 $n');
+      expect(n, greaterThan(0), reason: '地名不应被整体裁光');
       expect(r.warnings.any((w) => w.contains('上限')), isTrue,
           reason: '应给出上限截断 warning：${r.warnings}');
 

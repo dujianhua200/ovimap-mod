@@ -115,6 +115,44 @@ enum RoadStyle {
   final String label;
 }
 
+/// 底图覆盖口径（v3.34）。
+///
+/// [corridor] 沿杆路两侧 N 米 —— 只适合"只想看线路走廊"的临时图；
+/// [frame]    **按图幅覆盖范围** —— 图框内整幅图都有底图（商业出图口径）。
+enum BasemapCoverage { corridor, frame }
+
+/// 注记避让器：用"已占用矩形"做简单碰撞检测。
+///
+/// 商业出图里，注记不许压建筑、不许互相压字。这里按估算的文字包围盒
+/// 做 O(n²) 叠压判定 —— 一幅图的注记量级（几百条）完全够用。
+class _LabelPlacer {
+  final List<List<double>> _placed = <List<double>>[];
+  final List<String> _names = <String>[];
+
+  /// 尝试占位。成功返回 true；与已有注记重叠则返回 false（调用方跳过该注记）。
+  bool tryAdd(double cx, double cy, double w, double h,
+      {double angleDeg = 0, String name = ''}) {
+    final rad = angleDeg * math.pi / 180;
+    final ca = math.cos(rad).abs(), sa = math.sin(rad).abs();
+    final bw = w * ca + h * sa;
+    final bh = w * sa + h * ca;
+    final r = <double>[
+      cx - bw / 2,
+      cy - bh / 2,
+      cx + bw / 2,
+      cy + bh / 2,
+    ];
+    if (name.isNotEmpty && _names.contains(name)) return false;
+    for (final p in _placed) {
+      final overlap = !(r[2] < p[0] || r[0] > p[2] || r[3] < p[1] || r[1] > p[3]);
+      if (overlap) return false;
+    }
+    _placed.add(r);
+    if (name.isNotEmpty) _names.add(name);
+    return true;
+  }
+}
+
 class DxfExporter {
   DxfExporter._();
 
@@ -140,6 +178,10 @@ class DxfExporter {
     // —— 本次新增（均带默认值，旧调用点无需修改）——
     DxfVersion version = DxfVersion.r12, // 默认 R12（已用 ezdxf 严格打开验证）
     double rangeM = 50, // 底图范围（米）：默认沿线 50（UI 传值优先）
+
+    /// 底图覆盖口径：默认 `frame`（图幅口径）由 UI 显式传入；
+    /// 程序内默认保持 `corridor`，以兼容既有调用点与单元测试。
+    BasemapCoverage coverage = BasemapCoverage.corridor,
     bool layerRoads = true,
     bool layerBuildingOutline = true,
     bool buildingFill = false, // 建筑填充（默认关；true 时 R2000=HATCH / R12=SOLID）
@@ -361,6 +403,15 @@ class DxfExporter {
     // 必须先画，业务层（杆路/配线/桩号/标签）后画，才能保证业务层最终置顶、
     // 不被底图填充盖住（设计 §P0-5 业务层置顶；A6 绘制顺序）。
     // 数据来源优先级：导入的本地开源矢量（离线）> 注入/缓存/网络抓取。
+    // **图幅覆盖范围**（经纬度外包框，v3.34）
+    //
+    // 用户痛点：图框里一大片空白，建筑只有零星几栋、很多道路没有、村庄名也缺。
+    // 根因是底图只抓取"线路两侧 50 米"的走廊，而图幅覆盖范围通常是
+    // 1:3000 下 1260×891 米（A3）。现在按图幅覆盖去抓，整幅图都有底图。
+    final coverageBbox = coverage == BasemapCoverage.frame
+        ? _frameCoverageBbox(labels, frame, routeScale)
+        : null;
+
     BasemapFetchReport? report;
     if (includeSurroundings) {
       var bm = const BasemapData(
@@ -378,7 +429,7 @@ class DxfExporter {
         // 旧实现「裁剪为空则回退全量」是用户每次导出 ≈50MB 的根因：线路一旦落在
         // 底图数据空白处（如罗山/光山/新县农村），裁剪为空 → 回退 → 整个信阳
         // 4.4 万要素全写进 DXF。此处改为「空就是空 + 明确中文提示」，绝不兜底全量。
-        final bbox = BasemapFetcher.boundsOf(labels, rangeM);
+        final bbox = coverageBbox ?? BasemapFetcher.boundsOf(labels, rangeM);
         // **严格按范围裁剪**（v3.20 修：用户设 50m 却导出 ~105m 宽）。
         //
         // 原 `toleranceM: rangeM * 0.1` 是"向外放 10%"的容差，本意是避免
@@ -402,14 +453,22 @@ class DxfExporter {
         //
         // 这里改成逐要素判定"到线路的最近距离 ≤ rangeM"：
         // 只有贴着杆路两侧 50m 内才保留，远端连线之间的空白不再进图。
-        cropped = _cropByRouteBuffer(cropped, labels, rangeM);
+        if (coverageBbox == null) {
+          cropped = _cropByRouteBuffer(cropped, labels, rangeM);
+        }
         // R3 防御性上限：进入渲染前兜底截断，防病态巨型文件（详见 capFeatures 文档）。
+        // 图幅口径下要素量远大于走廊口径（整幅 A3 约 1260×891m），
+        // 沿用 2 万上限会按"离线路远近"截断，远端建筑整片消失 —— 正是
+        // 用户说的"建筑不全"。这里按口径给不同的防御上限。
+        final cap = coverage == BasemapCoverage.frame
+            ? math.max(localBasemapFeatureCap, 60000)
+            : localBasemapFeatureCap;
         cropped = GeoJsonImporter.capFeatures(
           cropped,
           routePts: [
             for (final l in labels) [l.lat, l.lon]
           ],
-          cap: localBasemapFeatureCap,
+          cap: cap,
           warnings: warnings,
         );
         final empty = cropped.roads.isEmpty &&
@@ -434,6 +493,8 @@ class DxfExporter {
         bm = await BasemapFetcher.fetchFor(
           labels,
           rangeM: rangeM,
+          bboxOverride: coverageBbox,
+          corridorMode: coverageBbox == null,
           tdtKey: tdtKey,
           amapKey: amapKey,
           overpassEndpoints: overpassEndpoints,
@@ -442,9 +503,11 @@ class DxfExporter {
           refresh: refreshBasemap,
         );
         
-        // 网络抓取走的是外包矩形；再按沿线路缓冲收一次，
-        // 保证"范围档位"在三条数据来源上口径一致。
-        bm = _cropByRouteBuffer(bm, labels, rangeM);
+        // 网络抓取走的是外包矩形；走廊口径再按沿线路缓冲收一次。
+        // 图幅口径（coverageBbox != null）不再收窄 —— 否则又变回一条细走廊。
+        if (coverageBbox == null) {
+          bm = _cropByRouteBuffer(bm, labels, rangeM);
+        }
       }
       report = bm.report;
       warnings.addAll(bm.report.toWarnings());
@@ -892,12 +955,16 @@ class DxfExporter {
     // 图签要落在格子的几何正中，不能再叠 0.35h 的基线补偿 ——
     // 那个补偿是给"压在线条上"的标注用的。图签用它会整体下沉
     // 1.0~1.6 个单位，正是用户说的"字老错行，没在表格内"。
-    // v3.33：垂直补偿必须沿**文字法线**方向施加。
-    // 旧实现直接改世界 Y，文字旋转后补偿量变成斜向/横向位移，
-    // 正是倾斜路名、段标“字体偏移、不协调”的根因。
-    final dOff = (centered && !vCenterExact)
-        ? -h * 0.35 + h * (liftAboveLine ? 0.95 : 0)
-        : 0.0;
+    // **v3.34：垂直居中一律交给 CAD 自己做（组码 72=4 Middle）**
+    //
+    // 之前用"基线点 + 手工下移 0.35×字高"来模拟垂直居中，只要字体、字高、
+    // 旋转或 CAD 的字形度量稍有差异，文字就会整体偏上/偏下 ——
+    // 用户反复反馈的"字体偏移、不协调"就是它。
+    //
+    // 72=4（Middle）是 DXF 规范里的"正中"对齐：由 CAD 按文字实际包围盒
+    // 计算，插入点即文字几何中心，各家 CAD（AutoCAD / 中望 / 浩辰）都支持。
+    // 只在需要"浮在线条上方"时，沿**文字法线**做一次整体平移。
+    final dOff = (centered && liftAboveLine) ? h * 0.9 : 0.0;
     final rad = (angle ?? 0) * math.pi / 180;
     final xAdj = x - math.sin(rad) * dOff;
     final yAdj = y + math.cos(rad) * dOff;
@@ -919,9 +986,9 @@ class DxfExporter {
     // DXF 组码本来就无序要求，把 `1\n<文本>` 提到前面即可消除歧义。
     c.sb.write('1\n$t\n');
     if (centered) {
-      // 只给水平居中（72=1），对齐点与插入点一致。
-      // 不写 73：避免各 CAD 对"垂直居中"理解不一致导致偏移。
-      c.sb.write('72\n1\n');
+      // 72=4 = 正中（水平垂直都居中），插入点即文字几何中心。
+      // 对齐点（11/21）与插入点一致，R12/R2000 均按此解释。
+      c.sb.write('72\n4\n');
       c.sb.write('11\n${_fmt(xAdj)}\n21\n${_fmt(yAdj)}\n31\n0\n');
     }
     if (c.r2000) c.sb.write('100\nAcDbText\n');
@@ -1674,6 +1741,69 @@ class DxfExporter {
   ///  · 道路：折线任一点在缓冲内即保留**整条被裁后的段**；
   ///  · 建筑：外环任一点在缓冲内即保留整栋（封闭面不裁几何）；
   ///  · 地名：点判断。
+  /// 对外暴露：按图幅计算底图抓取范围（导出前"探测"与正式导出同一口径）。
+  static List<double>? coverageBboxFor(
+          List<MapLabel> labels, FrameTemplate? frame, int scale) =>
+      _frameCoverageBbox(labels, frame, scale);
+
+  /// 图幅覆盖范围（经纬度外包框）：**图框里整幅图都要有底图**。
+  ///
+  /// 计算口径与 `_appendUserFrameOrFallback` 的分幅一致：
+  /// 单张 = 图框居中于线路；多张 = 按内容区平铺。
+  /// 返回 `[minLat, minLon, maxLat, maxLon]`；无标注点时返回 null。
+  static List<double>? _frameCoverageBbox(
+    List<MapLabel> labels,
+    FrameTemplate? frame,
+    int scale,
+  ) {
+    if (labels.isEmpty) return null;
+    // 线路在图纸单位下的跨幅（与导出主流程同一套换算）
+    final baseLat0 = labels.first.lat;
+    final mPerDegX = 111320.0 * math.cos(baseLat0 * math.pi / 180);
+    const mPerDegY = 110540.0;
+    var rMinX = 0.0, rMinY = 0.0, rMaxX = 0.0, rMaxY = 0.0;
+    for (final l in labels) {
+      final x = (l.lon - labels.first.lon) * mPerDegX;
+      final y = (l.lat - baseLat0) * mPerDegY;
+      if (x < rMinX) rMinX = x;
+      if (x > rMaxX) rMaxX = x;
+      if (y < rMinY) rMinY = y;
+      if (y > rMaxY) rMaxY = y;
+    }
+    final routeMinX = rMinX, routeMinY = rMinY;
+    final routeMaxX = rMaxX, routeMaxY = rMaxY;
+    final unitsPerMeter = scale / 1000.0;
+    // 图框默认按 A3 横向（420×297）兜底，与 UI 默认一致。
+    final frameW = frame?.width ?? 420.0;
+    final frameH = frame?.height ?? 297.0;
+    final frameWM = frameW * unitsPerMeter; // 图幅实地宽度（米）
+    final frameHM = frameH * unitsPerMeter;
+    final contentW = (frame?.contentWidth ?? frameW);
+    final contentH = (frame?.contentHeight ?? frameH);
+    final cols =
+        math.max(1, ((routeMaxX - routeMinX).abs() / math.max(1e-6, contentW)).ceil());
+    final rows =
+        math.max(1, ((routeMaxY - routeMinY).abs() / math.max(1e-6, contentH)).ceil());
+
+    // 线路经纬度外包中心（图框即以此为中心）
+    var minLat = 90.0, maxLat = -90.0, minLon = 180.0, maxLon = -180.0;
+    for (final l in labels) {
+      if (l.lat < minLat) minLat = l.lat;
+      if (l.lat > maxLat) maxLat = l.lat;
+      if (l.lon < minLon) minLon = l.lon;
+      if (l.lon > maxLon) maxLon = l.lon;
+    }
+    final cLat = (minLat + maxLat) / 2;
+    final cLon = (minLon + maxLon) / 2;
+    final cosLat = math.cos(cLat * math.pi / 180).abs().clamp(0.05, 1.0);
+    // 多幅时按整组图幅的总覆盖算；另加 5% 余量，避免图框边缘缺数据。
+    final halfWM = cols * frameWM * 0.55;
+    final halfHM = rows * frameHM * 0.55;
+    final padLat = halfHM / 110540.0;
+    final padLon = halfWM / (111320.0 * cosLat);
+    return [cLat - padLat, cLon - padLon, cLat + padLat, cLon + padLon];
+  }
+
   static BasemapData _cropByRouteBuffer(
       BasemapData bm, List<MapLabel> labels, double rangeM) {
     if (rangeM <= 0 || labels.isEmpty) return bm;
@@ -2358,12 +2488,38 @@ class DxfExporter {
   }
 
   /// 近似居中 TEXT：汉字按全宽、字母数字按半宽估宽。
+  /// 估算文字宽度（图纸单位）。中文按 1.0×字高，西文数字按 0.55×字高。
+  static double _textWidthM(String text, double h) {
+    var w = 0.0;
+    for (final r in text.runes) {
+      if (r < 0x2E80) {
+        w += (r == 0x20) ? 0.3 * h : 0.55 * h;
+      } else {
+        w += 1.0 * h;
+      }
+    }
+    return w;
+  }
+
   static void _appendTextCentered(_Ctx c, String layer,
-      double cx, double cy, double h, String text, {bool style = true}) {
+      double cx, double cy, double h, String text,
+      {bool style = true,
+      double? angle,
+      bool liftAboveLine = false,
+      _LabelPlacer? placer}) {
     if (text.isEmpty) return;
-    // 不再按估算字宽手工左移（中英混排、不同字体下估算误差大，导致地名偏移）：
-    // 交给 CAD 用 72=1 精确水平居中，垂直方向由 _text 统一做 0.35h 基线补偿。
-    _text(c, layer, cx, cy, h, text, style: style, centered: true);
+    // 避让：同名/相邻注记不叠字（商业出图的基本要求）。
+    if (placer != null &&
+        !placer.tryAdd(cx, cy, _textWidthM(text, h), h,
+            angleDeg: angle ?? 0)) {
+      return;
+    }
+    // 水平/垂直都交给 CAD 的 72=4（正中）对齐，不再手工估算偏移。
+    _text(c, layer, cx, cy, h, text,
+        style: style,
+        centered: true,
+        angle: angle,
+        liftAboveLine: liftAboveLine);
   }
 
   // ---- 通用 ----
@@ -2555,6 +2711,8 @@ class DxfExporter {
   }) {
     final acc = _Ext(double.infinity, double.infinity, -double.infinity,
         -double.infinity);
+    // 底图注记共用一套避让器：路名 / 建筑名 / 地名互不叠字。
+    final placer = _LabelPlacer();
     // 文字后置：使底图注记压在底图几何之上（CAD 中后画者在上层）。
     // 注意：整段底图（含其文字）都先于业务层写出，故业务层仍整体置顶（P0-5）。
     // 底图文字缓冲与主体共用句柄分配器（c.h），避免重复句柄。
@@ -2618,7 +2776,8 @@ class DxfExporter {
             cx /= o.length;
             cy /= o.length;
             final h = _mmOf(1.6, scale); // 建筑名 1.6mm
-            _appendTextCentered(lc, 'JianZhu', cx, cy, h, b.name);
+            _appendTextCentered(lc, 'JianZhu', cx, cy, h, b.name,
+                placer: placer);
           }
         }
       }
@@ -2628,7 +2787,7 @@ class DxfExporter {
     if (layerRoads) {
       for (final r in bm.roads) {
         _appendRoadDualAndCenter(c, lc, r, baseLon, baseLat, scaleX,
-            scaleY, scale, version, acc, showMinorRoadNames,
+            scaleY, scale, version, acc, showMinorRoadNames, placer,
             roadStyle: roadStyle, roadWidthScale: roadWidthScale,
             roadWidthMm: roadWidthMm);
       }
@@ -2654,11 +2813,15 @@ class DxfExporter {
 
     // —— 地名（DiMing 层，字号按级别）——
     if (layerPlaces) {
-      for (final p in bm.places) {
+      // **按级别排序后再画**：市/镇名优先占位，村/自然村名让位，
+      // 保证"重要的名字一定在图上"，不会被一堆小地名先占满。
+      final ranked = List<PlaceFeature>.from(bm.places)
+        ..sort((a, b) => _placeRank(a.level).compareTo(_placeRank(b.level)));
+      for (final p in ranked) {
         final x = (p.lon - baseLon) * scaleX;
         final y = (p.lat - baseLat) * scaleY;
-        _appendTextCentered(lc, 'DiMing', x, y,
-            _mmOf(_placeFontMm(p.level), scale), p.name);
+        final h = _mmOf(_placeFontMm(p.level), scale);
+        _appendTextCentered(lc, 'DiMing', x, y, h, p.name, placer: placer);
         acc.add(x, y);
       }
     }
@@ -2782,7 +2945,8 @@ class DxfExporter {
     int scale,
     DxfVersion version,
     _Ext acc,
-    bool showMinorRoadNames, {
+    bool showMinorRoadNames,
+    _LabelPlacer placer, {
     RoadStyle roadStyle = RoadStyle.hollow,
     double roadWidthScale = 1.0,
 
@@ -2846,21 +3010,22 @@ class DxfExporter {
       RoadGrade.service || RoadGrade.other => false,
     };
     if (rp.name.isNotEmpty && (isMajor || showMinorRoadNames)) {
-      _appendRoadName(lc, rp.name, simp, rp.grade, scale, halfW);
+      _appendRoadName(lc, rp.name, simp, rp.grade, scale, halfW, placer);
     }
   }
 
   /// 路名注记：**置于道路中心线上（即双线描边之间）**，字号 clamp 进双线间隙，
   /// 沿弧长每约 200 米一处（均匀分布），宋体（SongTi 样式），旋转不倒立。
   static void _appendRoadName(_Ctx lc, String name,
-      List<List<double>> pts, RoadGrade grade, int scale, double halfW) {
-    // 字号 clamp：必须放得进双线之间（0.6 系数留上下空隙）
-    final h = math.min(_roadLabelM(grade, scale), 2 * halfW * 0.6);
-    // clamp 后纸面高度下限：低于最小可读高度则该路不标注（塞不下，硬塞会糊）。
-    // 注：现行分级半宽表下双线间隙最大 0.9mm（trunk），clamp 后字高最大 0.54mm，
-    // 若按字面 1mm 阈值会把全部路名吞掉（与"尽量多保留路名"冲突），
-    // 故取可读下限 0.10mm 纸面高度——仅病态窄路/未来表变更时兜底。
-    if (h < _mmOf(0.10, scale)) return;
+      List<List<double>> pts, RoadGrade grade, int scale, double halfW,
+      _LabelPlacer placer) {
+    // **字高与路宽脱钩（v3.34）**
+    //
+    // 旧实现把字高 clamp 进双线间隙（0.6×2×半宽），1:3000 下 residential
+    // 只剩 0.43mm —— 图上根本看不清，看起来就是"路名排版乱、字体大小不一"。
+    // 商业地形图的做法是：路名固定按等级字号，骑在路面上方，不塞进线间。
+    final h = _roadLabelM(grade, scale);
+    if (h < _mmOf(0.8, scale)) return;
     var totalLen = 0.0;
     for (var i = 1; i < pts.length; i++) {
       final dx = pts[i][0] - pts[i - 1][0];
@@ -2890,10 +3055,20 @@ class DxfExporter {
         final t = segLen > 1e-9 ? (target - walked) / segLen : 0.0;
         final px = s[0] + dx * t;
         final py = s[1] + dy * t;
-        // 旋转不倒立：>90 或 <-90 时 +180（沿用既有逻辑）
+        // 旋转不倒立：>90 或 <-90 时 +180
         var angle = math.atan2(dy, dx) * 180 / math.pi;
         if (angle > 90 || angle < -90) angle += 180;
-        _text(lc, 'DaoLu', px, py, h, name, angle: angle, styleName: 'SongTi');
+        // 沿**法线**平移半个路宽 + 0.7 字高：字压在路面上方，不压线、不入线间
+        final len = math.sqrt(dx * dx + dy * dy);
+        final nx = len > 1e-9 ? -dy / len : 0.0;
+        final ny = len > 1e-9 ? dx / len : 1.0;
+        final off = halfW + h * 0.7;
+        final tx = px + nx * off;
+        final ty = py + ny * off;
+        if (placer.tryAdd(tx, ty, _textWidthM(name, h), h, angleDeg: angle)) {
+          _text(lc, 'DaoLu', tx, ty, h, name,
+              angle: angle, styleName: 'SongTi', centered: true);
+        }
         idx++;
       }
       walked += segLen;
@@ -3098,6 +3273,17 @@ class DxfExporter {
         RoadGrade.residential => 1.5,
         RoadGrade.service => 2.0,
         RoadGrade.other => 2.0,
+      };
+
+  /// 地名级别 → 优先级（数字小的先占位）。
+  static int _placeRank(PlaceLevel l) => switch (l) {
+        PlaceLevel.city => 0,
+        PlaceLevel.town => 1,
+        PlaceLevel.suburb => 2,
+        PlaceLevel.village => 3,
+        PlaceLevel.neighbourhood => 4,
+        PlaceLevel.residential => 5,
+        PlaceLevel.hamlet => 6,
       };
 
   /// 地名级别 → 字号（纸面毫米）。

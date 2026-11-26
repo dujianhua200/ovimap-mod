@@ -389,8 +389,7 @@ void main() {
   // ==========================================================================
   // 坑③ N1 / N2 / 地名（自写合成 Overpass JSON）
   // ==========================================================================
-  test('坑③ N1：无名 service/track/path/residential/unclassified/living_street 保留；'
-      '无名 footway/steps/cycleway/pedestrian/bridleway 丢弃', () {
+  test('v3.34 N1：全等级路网保留（含无名小路），仅丢弃 steps/bridleway/在建', () {
     Map<String, dynamic> way(String hw, double lon, {String? name}) => {
           'type': 'way',
           'geometry': [
@@ -416,11 +415,12 @@ void main() {
       ]
     });
     final roads = OverpassClient.parseRoads(json);
-    // 保留：6 无名(service/track/path/residential/unclassified/living_street) + 1 有名 footway
-    expect(roads.length, 7,
-        reason: '应保留 6 无名内部路 + 1 有名 footway，实测 ${roads.length}');
-    expect(roads.where((r) => r.grade == RoadGrade.service).length, 3,
-        reason: 'service/track/path 归 service 且无名保留');
+    // 保留：9 条无名（service/track/path/residential/unclassified/living_street/
+    // footway/cycleway/pedestrian）+ 1 条有名 footway；仅 steps/bridleway 丢弃。
+    expect(roads.length, 10,
+        reason: '图面路网要完整：小路/步道也入图，实测 ${roads.length}');
+    expect(roads.where((r) => r.grade == RoadGrade.service).length, 6,
+        reason: 'service/track/path/footway/cycleway/pedestrian 均归 service');
     expect(roads.any((r) => r.name == '有名步道'), isTrue);
   });
 

@@ -771,7 +771,11 @@ void main() {
         rangeM: 300,
       );
       final e = _parseDxf(gbk_bytes.decode(r.file.readAsBytesSync()));
-      expect(_cntLayer(e, 'DiMing'), 60, reason: '应截断到注入上限 60');
+      // v3.34：注记加了避让（重叠地名不再叠画），因此落图条数 ≤ 上限 60。
+      // 断言口径改为"不超过注入上限且确实截断了"，不再逐条相等。
+      expect(_cntLayer(e, 'DiMing'), lessThanOrEqualTo(60),
+          reason: '应截断到注入上限 60（避让后实际落图更少）');
+      expect(_cntLayer(e, 'DiMing'), greaterThan(0), reason: '仍应有地名落图');
       expect(r.warnings.any((w) => w.contains('上限')), isTrue);
       dir.deleteSync(recursive: true);
     }, timeout: const Timeout(Duration(minutes: 2)));

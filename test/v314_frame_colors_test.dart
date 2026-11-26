@@ -144,7 +144,7 @@ void main() {
   });
 
   group('距离数字居上（v3.17 修正）', () {
-    test('水平居中 72=1，且不写 73（避免各 CAD 理解不一致）', () async {
+    test('正中对齐 72=4（水平垂直都由 CAD 算），不写 73', () async {
       final r = await DxfExporter.export(
         name: 'centered',
         labels: chain(),
@@ -157,7 +157,7 @@ void main() {
       final ents = _textEntities(txt, 'JuLi');
       expect(ents, isNotEmpty, reason: '应有距离文字');
       for (final e in ents) {
-        expect(e, contains('72\n1\n'), reason: '水平居中');
+        expect(e, contains('72\n4\n'), reason: '正中（Middle）对齐');
         expect(e, isNot(contains('73\n')), reason: '不写 73：垂直位置由字高算死');
         expect(e, contains('11\n'), reason: '应有对齐点 11/21');
       }

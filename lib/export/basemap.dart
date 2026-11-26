@@ -581,6 +581,33 @@ class BasemapFetcher {
     return out;
   }
 
+  /// 周边要素（电力/水系）按**矩形框**裁剪（图幅模式）。
+  static List<ExtraPoly> cropExtrasToBbox(
+      List<ExtraPoly> items, List<double> bbox) {
+    bool inside(double la, double lo) => _inBbox(la, lo, bbox);
+    final out = <ExtraPoly>[];
+    for (final e in items) {
+      var cur = <List<double>>[];
+      for (var i = 0; i < e.pts.length; i++) {
+        final p = e.pts[i];
+        if (inside(p[0], p[1])) {
+          if (cur.isEmpty && i > 0) {
+            final q = e.pts[i - 1];
+            cur.add(_clipSegWith(q[0], q[1], p[0], p[1], inside) ?? p);
+          }
+          cur.add(p);
+        } else if (cur.isNotEmpty) {
+          final q = e.pts[i - 1];
+          cur.add(_clipSegWith(q[0], q[1], p[0], p[1], inside) ?? q);
+          if (cur.length >= 2) out.add(ExtraPoly(cur, e.kind, e.name));
+          cur = <List<double>>[];
+        }
+      }
+      if (cur.length >= 2) out.add(ExtraPoly(cur, e.kind, e.name));
+    }
+    return out;
+  }
+
   /// 道路按**到线路的距离**裁剪（缓冲带），保留落到带内的连续段，边界插值收口。
   static List<RoadPoly> cropRoadsToRoute(
       List<RoadPoly> items, List<MapLabel> labels, double rangeM) {
@@ -681,6 +708,14 @@ class BasemapFetcher {
   static Future<BasemapData> fetchFor(
     List<MapLabel> labels, {
     double rangeM = 50,
+    /// **图幅模式的外包框**（`[minLat, minLon, maxLat, maxLon]`）。
+    ///
+    /// 出图要的是"整幅图上都有底图"，不是"只在线路两侧 50 米有底图"。
+    /// 传入图幅覆盖范围后，抓取与裁剪都按这个矩形走，图面才不会一大片空白
+    /// （这正是用户反馈"建筑不全、很多道路没有、村庄名字经常没有"的根因）。
+    List<double>? bboxOverride,
+    /// 是否按**沿线路缓冲**裁剪。`false` = 按 [bboxOverride] 矩形裁剪（图幅模式）。
+    bool corridorMode = true,
     String tdtKey = '',
     String amapKey = '',
     String overpassEndpoints = '', // 用户自定义 Overpass 端点原文（多分隔符；空=用内置）
@@ -690,12 +725,14 @@ class BasemapFetcher {
     bool includeExtras = true, // 电力线 / 水系（导出面板可关）
     BasemapCache? cache,
   }) async {
-    if (labels.isEmpty) return BasemapData.empty();
-    final bbox = boundsOf(labels, rangeM);
+    if (labels.isEmpty && bboxOverride == null) return BasemapData.empty();
+    final bbox = bboxOverride ?? boundsOf(labels, rangeM);
     final bboxStr = '${bbox[0]},${bbox[1]},${bbox[2]},${bbox[3]}';
+    // 裁剪口径：图幅模式按矩形框裁（整幅图都有底图）；沿线模式按线路缓冲带裁。
+    final corridor = corridorMode && labels.isNotEmpty;
+    bool inBbox(double la, double lo) => _inBbox(la, lo, bbox);
     final c = cache ?? await BasemapCache.open();
 
-    // Overpass 端点：用户自定义优先、内置兜底（未配置时等价 builtin()，行为不变）。
     final overpassEps = OverpassEndpoints.resolve(overpassEndpoints);
 
     final roadsF = _load<RoadPoly>(
@@ -708,7 +745,9 @@ class BasemapFetcher {
       parse: OverpassClient.parseRoads,
       // ⚠️ 关键修复（v3.9.2）：道路必须**沿边界几何截断**，不是"点中即保留整条"。
       // 沿线路缓冲裁剪（不是矩形包围盒）：只留轨迹附近 rangeM 米内的路。
-      crop: (items) => cropRoadsToRoute(items, labels, rangeM),
+      crop: (items) => corridor
+          ? cropRoadsToRoute(items, labels, rangeM)
+          : cropRoadsToBbox(items, bbox),
     );
     final bldF = _load<BuildingPoly>(
       kind: 'buildings',
@@ -719,8 +758,10 @@ class BasemapFetcher {
       endpoints: overpassEps,
       parse: OverpassClient.parseBuildings,
       crop: (items) => items
-          .where((b) => b.outer.any(
-              (p) => distToRouteM(labels, p[0], p[1]) <= rangeM))
+          .where((b) => corridor
+              ? b.outer.any(
+                  (p) => distToRouteM(labels, p[0], p[1]) <= rangeM)
+              : b.outer.any((p) => inBbox(p[0], p[1])))
           .toList(),
     );
     final plcF = _load<PlaceFeature>(
@@ -732,7 +773,9 @@ class BasemapFetcher {
       endpoints: overpassEps,
       parse: OverpassClient.parsePlaces,
       crop: (items) => items
-          .where((p) => distToRouteM(labels, p.lat, p.lon) <= rangeM)
+          .where((p) => corridor
+              ? distToRouteM(labels, p.lat, p.lon) <= rangeM
+              : inBbox(p.lat, p.lon))
           .toList(),
     );
 
@@ -745,7 +788,9 @@ class BasemapFetcher {
             refresh: refresh,
             endpoints: overpassEps,
             parse: OverpassClient.parseExtras,
-            crop: (items) => cropExtrasToRoute(items, labels, rangeM),
+            crop: (items) => corridor
+          ? cropExtrasToRoute(items, labels, rangeM)
+          : cropExtrasToBbox(items, bbox),
           )
         : Future.value(_LoadResult<ExtraPoly>(
             const DatasetReport(FetchState.failed, error: '未开启'),
@@ -800,8 +845,9 @@ class BasemapFetcher {
     // 旧地名缓存（项目级近乎永久），也不会把范围外的地名带进 DXF
     // （用户复现的"矢量图外侧很远处密密麻麻的名字"）。count 同步修正，口径一致。
     // 出口再按**沿线路缓冲**兜底裁一次（含容差），矩形包围盒不再作为最终口径。
-    final finalPlaces = cropPlacesToRoute(
-        places.items, labels, rangeM + placeCropTolM);
+    final finalPlaces = corridor
+        ? cropPlacesToRoute(places.items, labels, rangeM + placeCropTolM)
+        : cropPlaces(places.items, bbox);
     if (finalPlaces.length != places.items.length) {
       places = _LoadResult(
         DatasetReport(
