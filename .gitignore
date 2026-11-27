@@ -65,3 +65,5 @@ macos/Runner.xcodeproj/xcuserdata/
 # 路网抓取临时数据（保留示范文件）
 data/amap_roads/*.geojson
 !data/amap_roads/beijing_wangfujing.geojson
+data/amap_roads/.xinyang_cache/
+data/amap_roads/*.log
