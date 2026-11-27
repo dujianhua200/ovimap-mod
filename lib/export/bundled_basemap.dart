@@ -38,14 +38,14 @@ import 'building_index.dart';
 /// "明明有数据的地方"判成没数据，兜底被静默跳过。
 ///
 /// 实测（assets/buildings/*.geojson.gz 真实包围盒）：
-///   roads     lon 113.708~115.598  lat 31.190~32.585  （v3.37 高德矢量瓦片，205493 条）
+///   roads     lon 113.703~115.593  lat 31.192~32.588  （v3.38 高德矢量瓦片，205484 条）
 ///   places    lon 113.699~115.600  lat 31.200~32.596
 ///   buildings lon 113.723~115.932  lat 31.393~32.664
 ///
 /// 取**三者交集**再各留 0.02° 余量：
 ///   lon 113.72 ~ 115.58   lat 31.41 ~ 32.58
-///   （交集仍由 buildings 决定：v3.37 高德矢量 roads 下界
-///    lon 113.708/lat 31.190，places 下界 31.200，均不高于
+///   （交集仍由 buildings 决定：v3.38 高德矢量 roads 下界
+///    lon 113.703/lat 31.192，places 下界 31.200，均不高于
 ///    buildings 的 113.723/31.393，故三者交集不变，常量不调整）
 ///
 /// 早期写的 113.7~115.6 / 31.2~32.6 比 buildings 的实际下界还宽，
@@ -61,7 +61,15 @@ const double kBundledLatMax = 32.58;
 /// v3：OSM+高德合并路网 26240 条（高德网格采样新增 2101 条、补路名 1293 条）。
 /// v4：高德矢量瓦片全量路网 205493 条（z14 瓦片，含村道小路；
 ///     1.5m 简化，gz 10.9MB）。路名 7762 条来自 type=2 瓦片端点匹配。
-const int kBundledBasemapVersion = 4;
+/// v5：**修正坐标系偏移**（用户反馈"道路有很大的偏移"）。两处根因：
+///     ① 瓦片 y 轴方向写反 —— py 从**南界**向北累积（py=0→lat0），
+///        旧代码写成 lat1 - py/2048*(lat1-lat0)，整片路网南北镜像；
+///     ② 瓦片坐标是 **GCJ-02 火星坐标**而非 WGS-84，旧代码直接当地理坐标
+///        存盘，在信阳整体偏东约 555m。
+///     判据：以高德 /v3/direction/driving 返回的精确 GCJ 折线为真值，
+///     修正后平均距离 0.0~0.2m；OSM 路网反向匹配中位 2.8m。
+///     205484 条，gz 11.0MB。
+const int kBundledBasemapVersion = 5;
 
 const String kBundledBuildingsAsset = 'assets/buildings/xinyang.geojson.gz';
 

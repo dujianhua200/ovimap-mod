@@ -217,18 +217,25 @@ def _decode_pts(ints):
 
 
 def _to_ll(pts, x, y, z, res):
-    """瓦片整数坐标 → 经纬度。
+    """瓦片整数坐标 → GCJ-02 经纬度。
 
-    extent 固定为 2^12=4096：实测 z14 瓦片内原始整数范围 -536~4096，
-    若按 2^res(res=13)=8192 换算，坐标会被压到瓦片左上 1/4，
-    与 OSM 比对中位偏差 58m；按 4096 换算后点均匀铺满整个 bbox。
+    extent：x 用 2^12=4096，y 用 2048。瓦片经度跨度是纬度跨度的 2 倍
+    （360/2^z vs 180/2^z），内部网格同比例。实测缓存 10922 瓦片：
+    x 原始整数 0~4096、y 原始整数 0~2048，按此换算刚好铺满 bbox。
+
+    y 轴方向：瓦片内 py 从**南边界**向北累积（py=0 对应 bbox 南界 lat0，
+    py=2048 对应北界 lat1）。早先版本写成 lat1 - py/2048*(lat1-lat0)，
+    方向正好相反，导致整片路网南北镜像。
+
+    坐标系：瓦片坐标是 **GCJ-02**（火星坐标），不是 WGS-84。
+    判据：直接用高德路径规划 /v3/direction/driving 返回的精确 GCJ 折线做真值，
+    解出的矢量路与其平均距离为 **0.0m**（完全重合）；若当成 WGS-84
+    会整体偏东约 555m（信阳），这正是「道路有很大偏移」的原因。
+    调用方必须再经 gcj02_to_wgs84 转成 WGS-84 才能与 OSM/建筑底图对齐。
     """
     lon0, lat0, lon1, lat1 = tile_bbox(x, y, z)
-    # x / y 的网格密度不同：瓦片经度跨度是纬度跨度的 2 倍（360/2^z vs 180/2^z），
-    # 内部网格同比例，故 x 用 4096、y 用 2048。若两者都用 4096，
-    # 纬度方向会被压缩一半，所有路都挤在瓦片上半部（实测归一化 y 只到 0.5~1.0）。
     return [(lon0 + (px / 4096.0) * (lon1 - lon0),
-             lat1 - (py / 2048.0) * (lat1 - lat0)) for px, py in pts]
+             lat0 + (py / 2048.0) * (lat1 - lat0)) for px, py in pts]
 
 
 def parse_roads(d, x, y, z):
@@ -279,11 +286,9 @@ def gcj02_to_wgs84(lon, lat):
     sq = math.sqrt(magic)
     dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sq) * math.pi)
     dlon = (dlon * 180.0) / (a / sq * math.cos(rad) * math.pi)
-    # 注意：实测高德矢量瓦片坐标已是 WGS-84，不需要做 GCJ 反偏移。
-    # 判据：对同一瓦片做二维平移搜索，最优平移为 东+70m/北-230m、平均残差
-    # 仍有 47.7m（数据源精度差）；而信阳 GCJ 理论偏移是 东+555m/北-215m。
-    # 若真做了 GCJ 反偏移（东向 -555m），反而会把整片路网推到西侧几百米外。
-    # 本函数保留为通用工具，主流程不使用。
+    # 高德矢量瓦片坐标是 GCJ-02，必须做此反偏移才能落到 WGS-84 上。
+    # 判据：以 /v3/direction/driving 返回的精确 GCJ 折线为真值，
+    # 反偏移后矢量路与其平均距离 0.0m；不做反偏移则整体偏东约 555m（信阳）。
     return lon - dlon, lat - dlat
 
 
@@ -475,7 +480,8 @@ def main():
             if not first:
                 f.write(',\n')
             first = False
-            wpts = [(lo, la) for lo, la in pts]  # 瓦片坐标已是 WGS-84
+            # 瓦片解出的坐标是 GCJ-02，必须反偏移到 WGS-84 才能与 OSM/建筑底图对齐。
+            wpts = [gcj02_to_wgs84(lo, la) for lo, la in pts]
             props = {
                 'highway': MAINKEY_HIGHWAY.get(mk, 'unclassified'),
                 'source': 'amap',
