@@ -154,10 +154,13 @@ def main():
     ap.add_argument("--timeout", type=int, default=90)
     ap.add_argument("--retries", type=int, default=4)
     ap.add_argument("--finalize", action="store_true", help="仅合并已有缓存")
+    ap.add_argument("--cache-dir", default=None, help="自定义缓存目录（细分片重抓时避免污染旧缓存）")
     ap.add_argument("-o", "--out", default=os.path.join(OUT_DIR, "xinyang_city.geojson"))
     args = ap.parse_args()
-    global FINAL_SPAN
+    global FINAL_SPAN, CACHE_DIR
     FINAL_SPAN = args.span
+    if args.cache_dir:
+        CACHE_DIR = args.cache_dir
     bbox = tuple(float(x) for x in args.bbox.split(","))
     parts = split_bbox(bbox, args.span)
     print("信阳路网抓取：bbox=%s  span=%.3f°  分片=%d  并发=%d"

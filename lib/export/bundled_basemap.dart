@@ -38,14 +38,15 @@ import 'building_index.dart';
 /// "明明有数据的地方"判成没数据，兜底被静默跳过。
 ///
 /// 实测（assets/buildings/*.geojson.gz 真实包围盒）：
-///   roads     lon 113.679~115.702  lat 31.086~32.670  （v3.35 全量路网，24139 条）
+///   roads     lon 113.726~115.674  lat 31.120~32.652  （v3.36 OSM+高德合并，26240 条）
 ///   places    lon 113.699~115.600  lat 31.200~32.596
 ///   buildings lon 113.723~115.932  lat 31.393~32.664
 ///
 /// 取**三者交集**再各留 0.02° 余量：
 ///   lon 113.72 ~ 115.58   lat 31.41 ~ 32.58
-///   （交集仍由 buildings/places 决定：新 roads 虽然更宽，lon 下界 113.679
-///    仍小于 buildings 的 113.723、lat 下界 31.086 更小，故交集不变，常量不调整）
+///   （交集仍由 buildings 决定：v3 合并 roads 下界 lon 113.726/lat 31.120，
+///    places 下界 31.200，均不高于 buildings 的 113.723/31.393，
+///    故三者交集不变，常量不调整）
 ///
 /// 早期写的 113.7~115.6 / 31.2~32.6 比 buildings 的实际下界还宽，
 /// 于是"建筑那一片"永远判不覆盖 —— 这就是用户三次反馈
@@ -57,7 +58,8 @@ const double kBundledLatMax = 32.58;
 
 /// 内置数据版本。换包时递增，便于诊断"用户装的是旧包"。
 /// v2：道路底图从 4501 条换成信阳全市 24139 条（WGS84，轴序 [lon,lat]）。
-const int kBundledBasemapVersion = 2;
+/// v3：OSM+高德合并路网 26240 条（高德网格采样新增 2101 条、补路名 1293 条）。
+const int kBundledBasemapVersion = 3;
 
 const String kBundledBuildingsAsset = 'assets/buildings/xinyang.geojson.gz';
 

@@ -66,4 +66,7 @@ macos/Runner.xcodeproj/xcuserdata/
 data/amap_roads/*.geojson
 !data/amap_roads/beijing_wangfujing.geojson
 data/amap_roads/.xinyang_cache/
+data/amap_roads/.xinyang_cache_005/
+data/amap_roads/.amap_cache/
+data/amap_roads/.amap_test_cache/
 data/amap_roads/*.log
