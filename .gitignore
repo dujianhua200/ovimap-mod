@@ -70,3 +70,6 @@ data/amap_roads/.xinyang_cache_005/
 data/amap_roads/.amap_cache/
 data/amap_roads/.amap_test_cache/
 data/amap_roads/*.log
+
+# 高德矢量瓦片抓取缓存与全量中间产物（体积大，只保留打包后的 assets）
+data/amap_vec/
