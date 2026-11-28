@@ -669,7 +669,7 @@ int _parseBlocks(List<List<String>> pairs, int start,
     }
     // 块内嵌块参照：只记录引用关系，展开由 _flatten 统一做（带缩放/旋转）。
     if (entType == 'INSERT') {
-      final list = inserts.putIfAbsent(curName!, () => <_InsertRef>[]);
+      final list = inserts.putIfAbsent(curName, () => <_InsertRef>[]);
       _collectInsert(ent, list);
       entType = '';
       ent = {};
