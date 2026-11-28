@@ -961,7 +961,8 @@ class DxfExporter {
       String? styleName,
       bool centered = false,
       bool liftAboveLine = false,
-      bool vCenterExact = false}) {
+      bool vCenterExact = false,
+      double? widthFactor}) {
     // **DXF 文字净化（关键防线）**
     //
     // 组码 1 是单行文本值：里面出现裸的 `\`、`{`、`}` 会让 CAD 解析失败，
@@ -1025,6 +1026,11 @@ class DxfExporter {
     if (sn != null) c.sb.write('7\n$sn\n');
     c.sb.write(
         '10\n${_fmt(xAdj)}\n20\n${_fmt(yAdj)}\n30\n0\n40\n${_fmt(h)}\n');
+    // 宽度因子（组码 41）：原版图框的字是压扁的（0.7/0.8），
+    // 不带上就会比原图宽 25%~43%，右侧顶出框。
+    if (widthFactor != null && (widthFactor - 1.0).abs() > 0.001) {
+      c.sb.write('41\n${_fmt(widthFactor)}\n');
+    }
     if (angle != null) c.sb.write('50\n${angle.toStringAsFixed(1)}\n');
 
     // **文本值必须先写**（v3.21 修）。
@@ -1470,13 +1476,15 @@ class DxfExporter {
           // 换算成 TEXT 基线要减去约 0.9 个字高。
           if (!frame.snapText) {
             final hh0 = t.h <= 0 ? 2.5 : t.h;
-            // ⚠️ 偏移要用**固定值**（= 0.9 × 图签基准字高 2.948 ≈ 2.66），
-            // 不能按每行的 h 各自换算：图签里有 2.457 / 2.948 两种字高
-            // （`\H1.2x` 放大的那几行），各算各的会让行距变成 5.28/6.16
-            // 交替，看着就是"行没对齐"。固定值保住原始行距。
-            final baseY = t.mtext ? t.y - 2.66 : t.y;
+            // 垂直：先按字身中心找到所属格，落在**格的几何中心**上。
+            // 这样图签里字高不同的行（2.457 / 2.948）视觉上一样齐 ——
+            // 之前按每行 y 各减固定值，行高不同就一行高一行低。
+            final cell = _cellCenterByTextCenter(frame, t.y, hh0);
+            final baseY = cell != null
+                ? cell - 0.35 * hh0
+                : (t.mtext ? t.y - 2.66 : t.y);
             _text(c, 'TuQian', t.x + dx, baseY + dy, hh0, txt,
-                angle: t.rot, style: true);
+                angle: t.rot, style: true, widthFactor: t.widthFactor);
             break;
           }
           // **把图框自带文字吸附到所在格的垂直中心**（v3.23~3.25）。
@@ -1548,6 +1556,39 @@ class DxfExporter {
     // 不在任何格内且离所有中心都远 → 不动（保护指北针 N 等）
     if (bestD > 6.0) return y;
     return bestCenter;
+  }
+
+  /// 按**字身中心**判定文字属于哪一格，返回该格几何中心（找不到返回 null）。
+  ///
+  /// 与 [_snapTextToCellIn] 的区别：后者拿 MTEXT 的左上附着点去判定，
+  /// 紧贴上边线的行会被上面那一格先捞走（旧版「审 核」叠到「部门主管」
+  /// 就是这么来的）。这里先把附着点换算成字身中心 `y - h/2` 再判定，
+  /// 每一行都稳稳落在自己那格里。
+  ///
+  /// 只给「原版图框」（`frame.snapText == false`）用，老图框仍走原逻辑。
+  static double? _cellCenterByTextCenter(
+      FrameTemplate frame, double y, double h) {
+    final hs = <double>[];
+    for (final s in frame.shapes) {
+      if (s is FrameLine && (s.y1 - s.y2).abs() < 0.01) {
+        hs.add((s.y1 + s.y2) / 2);
+      }
+    }
+    if (hs.length < 4) return null;
+    hs.sort((a, b) => b.compareTo(a));
+    final rows = <double>[];
+    for (final v in hs) {
+      if (rows.isEmpty || (rows.last - v).abs() > 0.05) rows.add(v);
+    }
+    if (rows.length < 4) return null;
+    final yc = y - h * 0.5;
+    for (var i = 0; i < rows.length - 1; i++) {
+      final top = rows[i], bot = rows[i + 1];
+      final gap = top - bot;
+      if (gap < 2.5 || gap > 12) continue;
+      if (yc >= bot && yc <= top) return (top + bot) / 2;
+    }
+    return null;
   }
 
   /// 把任意文字净化成可安全写进 DXF `组码 1` 的形式。
