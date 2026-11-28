@@ -39,6 +39,73 @@ class _Ext {
   }
 }
 
+/// 一条道路的"路面胶囊带"：中心折线 + 半宽（图纸单位）。
+///
+/// 路口修剪用它来回答"这条边线的这个点是不是落在别的路面上"。
+class _RoadBand {
+  final int idx;
+  final List<List<double>> pts;
+  final double halfW;
+  const _RoadBand(this.idx, this.pts, this.halfW);
+}
+
+/// 路面胶囊带的方格索引。
+///
+/// 为什么需要：一帧图幅模式有几千条路、十万级线段，边线采样点逐点与**全部**
+/// 路面求距是 O(点数 × 线段数)，实测慢到几百毫秒。按格子登记后每个采样点只
+/// 看邻近一格里的几条线段。
+class _BandGrid {
+  final double cell;
+  final Map<int, List<List<int>>> _cells = <int, List<List<int>>>{};
+  _BandGrid(this.cell);
+
+  int _key(int gx, int gy) => gx * 73856093 ^ gy * 19349663;
+
+  /// 把 [pts] 的每条线段按"外扩 [halfW] 的包围盒"登记到覆盖的格子里。
+  void addBand(int bandIdx, List<List<double>> pts, double halfW) {
+    for (var i = 1; i < pts.length; i++) {
+      final a = pts[i - 1], b = pts[i];
+      final minX = math.min(a[0], b[0]) - halfW;
+      final maxX = math.max(a[0], b[0]) + halfW;
+      final minY = math.min(a[1], b[1]) - halfW;
+      final maxY = math.max(a[1], b[1]) + halfW;
+      final gx0 = (minX / cell).floor(), gx1 = (maxX / cell).floor();
+      final gy0 = (minY / cell).floor(), gy1 = (maxY / cell).floor();
+      for (var gx = gx0; gx <= gx1; gx++) {
+        for (var gy = gy0; gy <= gy1; gy++) {
+          (_cells[_key(gx, gy)] ??= <List<int>>[]).add(<int>[bandIdx, i - 1]);
+        }
+      }
+    }
+  }
+
+  /// 取 3×3 邻域的候选（建筑质心判定用：质心可能落在紧邻的格子里）。
+  List<List<int>> near3(double x, double y) {
+    final gx = (x / cell).floor(), gy = (y / cell).floor();
+    final out = <List<int>>[];
+    for (var dx = -1; dx <= 1; dx++) {
+      for (var dy = -1; dy <= 1; dy++) {
+        final hit = _cells[_key(gx + dx, gy + dy)];
+        if (hit != null) out.addAll(hit);
+      }
+    }
+    return out;
+  }
+
+  /// 取该格子里的候选（每项 [bandIdx, segIdx]）。
+  List<List<int>> near(double x, double y) =>
+      _cells[_key((x / cell).floor(), (y / cell).floor())] ??
+      const <List<int>>[];
+}
+
+/// 路口修剪上下文：全部路面胶囊带 + 它们的方格索引。
+class _RoadTrim {
+  final List<_RoadBand> bands;
+  final _BandGrid grid;
+  const _RoadTrim(this.bands, this.grid);
+}
+
+
 /// DXF 句柄分配器（仅 R2000 使用）。句柄为十六进制字符串、全局唯一、递增。
 /// 起始值 `0x30`（48）；模块空间块固定占 `1F`（31，小于起始值，不冲突）。
 class _H {
@@ -1290,6 +1357,199 @@ class DxfExporter {
     if (len < 1e-9) return [1.0, 0.0];
     return [dx / len, dy / len];
   }
+
+  // ══════════════════════════════════════════════════════════════════
+  // v3.41 道路路面索引（图纸单位）
+  //
+  // 为什么需要：旧实现每条路独立画两条边线，既不与邻路求交也不裁剪，
+  // 于是 A3 单幅上 92% 的道路边线在路口"穿"过去（用户口径："交叉口
+  // 衔接处多余的没有修剪掉"）。要修就必须让每条路"知道"别的路占了
+  // 哪些地方，而全量两两求交是 O(n²)（市区几千条路 = 千万次），
+  // 所以先把路面段切段登记进方格，查询只看邻近格。
+  //
+  // 单位说明：这里的坐标是**图纸单位**（v3.13 起 1 单位 = 比例/1000 米，
+  // 数值上等于纸面毫米），半宽也是毫米，距离直接可比。
+  // ══════════════════════════════════════════════════════════════════
+
+  /// 点到线段最近点（用于"采样点是否落在别的路面内"的距离判定）。
+  static List<double> _segClosest(double px, double py, double ax, double ay,
+      double bx, double by) {
+    final dx = bx - ax, dy = by - ay;
+    final l2 = dx * dx + dy * dy;
+    if (l2 < 1e-12) return [ax, ay];
+    var t = ((px - ax) * dx + (py - ay) * dy) / l2;
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    return [ax + dx * t, ay + dy * t];
+  }
+
+  /// 点到线段的最短距离（图纸单位）。
+  static double _distToSeg(double px, double py, double ax, double ay,
+      double bx, double by) {
+    final q = _segClosest(px, py, ax, ay, bx, by);
+    final dx = px - q[0], dy = py - q[1];
+    return math.sqrt(dx * dx + dy * dy);
+  }
+
+  /// 各顶点的斜接偏移量（扁平 [dx0,dy0,dx1,dy1,...]，已乘 [off]）。
+  static List<double> _miterOffsets(List<List<double>> pts, double off,
+      double miterLimit) {
+    final n = pts.length;
+    if (n < 2) return const [];
+    final out = <double>[];
+    for (var i = 0; i < n; i++) {
+      List<double> dPrev, dNext;
+      if (i == 0) {
+        dPrev = dNext = _dir(pts[0], pts[1]);
+      } else if (i == n - 1) {
+        dPrev = dNext = _dir(pts[n - 2], pts[n - 1]);
+      } else {
+        dPrev = _dir(pts[i - 1], pts[i]);
+        dNext = _dir(pts[i], pts[i + 1]);
+      }
+      var nx = -(dPrev[1] + dNext[1]) / 2;
+      var ny = (dPrev[0] + dNext[0]) / 2;
+      final len = math.sqrt(nx * nx + ny * ny);
+      // 斜接补偿（v3.41）：转角处两条线段的法向均值长度 `len` 只有 cos(θ/2)，
+      // 直接乘 off 会让边线在急弯处**变窄**（实测 90° 弯只剩 71%），
+      // 表现为"边线压到路面里、路宽看起来忽宽忽窄"。放大系数 1/len = 1/cos(θ/2)。
+      var scale = 1.0;
+      if (len < 1e-9) {
+        nx = -dPrev[1];
+        ny = dPrev[0];
+        scale = miterLimit; // 180° 折返，限制斜接长度避免尖刺
+      } else {
+        nx /= len;
+        ny /= len;
+        scale = math.min(miterLimit, 1.0 / len);
+      }
+      out.add(nx * off * scale);
+      out.add(ny * off * scale);
+    }
+    return out;
+  }
+
+  /// 沿折线法向偏移 [off]（正=左法向，负=右法向），**带斜接补偿**。
+  ///
+  /// 与 [_offsetPolyline] 的唯一区别就是转角处按 1/cos(θ/2) 放大平移量，
+  /// 保证边线到中心线的垂距恒等于 |off|（直线段上两者完全一致）。
+  static List<List<double>> _offsetPolylineMiter(List<List<double>> pts,
+      double off, {double miterLimit = 3.0}) {
+    final n = pts.length;
+    if (n < 2) return const [];
+    final offs = _miterOffsets(pts, off, miterLimit);
+    if (offs.length < n * 2) return _offsetPolyline(pts, off);
+    return [
+      for (var i = 0; i < n; i++) [pts[i][0] + offs[i * 2], pts[i][1] + offs[i * 2 + 1]]
+    ];
+  }
+
+  /// 采样点是否落在**其它**道路的路面内（[selfIdx] 排除本路）。
+  ///
+  /// 判据是点到线段距离 < 该路半宽的 0.95 倍：略微收缩，让线头往路口里缩进
+  /// 一点点，CAD 里放大看不会露出"半根线头"。
+  static bool _coveredByOtherRoad(double x, double y, _RoadTrim trim,
+      int selfIdx) {
+    for (final c in trim.grid.near(x, y)) {
+      final bi = c[0];
+      if (trim.bands[bi].idx == selfIdx) continue;
+      final band = trim.bands[bi];
+      if (band.halfW <= 1e-6) continue;
+      final si = c[1];
+      final a = band.pts[si], b = band.pts[si + 1];
+      if (_distToSeg(x, y, a[0], a[1], b[0], b[1]) < band.halfW * 0.95) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// 把一条边线按"落在其它路面内"的区间切开，返回若干段**未遮挡**的折线。
+  ///
+  /// 这是"交叉口衔接处多余的没修剪掉"的修复：旧实现每条路各自画两条偏移线，
+  /// 从不与相邻道路求交，于是每个路口都有四条边线互相穿过去，图上是井字形的
+  /// 多余线段。改成先重采样、把被别家路面盖住的点丢掉，剩下的连续点连成段。
+  ///
+  /// 采样步长取 `max(0.7, halfW * 1.5)` 图纸单位（≈纸面毫米）：比最小线宽
+  /// （0.15mm）大一个量级，切点误差远小于 CAD 出图可见误差。
+  static List<List<List<double>>> _clipRoadEdge(
+      List<List<double>> line, _RoadTrim trim, int selfIdx, double halfW) {
+    if (line.length < 2) return const <List<List<double>>>[];
+    final step = math.max(0.7, halfW * 1.5);
+    final segs = <List<List<double>>>[];
+    var keep = <List<double>>[];
+
+    void flush() {
+      if (keep.length >= 2) segs.add(keep);
+      keep = <List<double>>[];
+    }
+
+    for (var i = 1; i < line.length; i++) {
+      final a = line[i - 1], b = line[i];
+      final dx = b[0] - a[0], dy = b[1] - a[1];
+      final len = math.sqrt(dx * dx + dy * dy);
+      if (len < 1e-9) continue;
+      final k = math.max(1, (len / step).ceil());
+      if (i == 1) {
+        if (!_coveredByOtherRoad(a[0], a[1], trim, selfIdx)) keep.add(a);
+      }
+      for (var j = 1; j <= k; j++) {
+        final t = j / k;
+        final px = a[0] + dx * t, py = a[1] + dy * t;
+        if (_coveredByOtherRoad(px, py, trim, selfIdx)) {
+          flush();
+        } else {
+          keep.add(<double>[px, py]);
+        }
+      }
+    }
+    flush();
+    return segs;
+  }
+
+
+  /// 把所有道路收成"路面胶囊带 + 方格索引"，供路口修剪查询。
+  ///
+  /// 每格的边长取 4 倍最大半宽（下限 8 图纸单位）：路面带很窄，格子太大就退化
+  /// 成逐线段扫描，太小则同一线段被登记进很多格、内存和建索引时间都涨。
+  static _RoadTrim _buildRoadTrim(
+    List<RoadPoly> roads,
+    double baseLon,
+    double baseLat,
+    double scaleX,
+    double scaleY,
+    int scale,
+    double roadWidthScale,
+    double? roadWidthMm,
+  ) {
+    final bands = <_RoadBand>[];
+    for (var i = 0; i < roads.length; i++) {
+      final r = roads[i];
+      final halfW = roadWidthMm != null
+          ? _mmOf(roadWidthMm, scale) / 2
+          : _roadHalfWidthM(r.grade, scale) * roadWidthScale;
+      if (halfW <= 1e-6) continue;
+      final cart = <List<double>>[
+        for (final p in r.pts)
+          [(p[1] - baseLon) * scaleX, (p[0] - baseLat) * scaleY]
+      ];
+      final unitsPerMeter = scale / 1000.0;
+      final simp = _simplifyPath(cart, _roadTolM(r.grade) / unitsPerMeter);
+      if (simp.length < 2) continue;
+      bands.add(_RoadBand(i, simp, halfW));
+    }
+    var maxHalf = 0.0;
+    for (final b in bands) {
+      if (b.halfW > maxHalf) maxHalf = b.halfW;
+    }
+    final cell = math.max(8.0, maxHalf * 4);
+    final grid = _BandGrid(cell);
+    for (var bi = 0; bi < bands.length; bi++) {
+      grid.addBand(bi, bands[bi].pts, bands[bi].halfW);
+    }
+    return _RoadTrim(bands, grid);
+  }
+
 
   /// 指北针：图框内右上角，圆 + N 字 + 指针三角。
   static void _appendNorthArrow(_Ctx c, double maxX, double maxY) {
@@ -2870,6 +3130,14 @@ class DxfExporter {
         -double.infinity);
     // 底图注记共用一套避让器：路名 / 建筑名 / 地名互不叠字。
     final placer = _LabelPlacer();
+
+    // **路面胶囊带索引（v3.41）**：建筑推离与路口修剪共用，只建一次。
+    // 空心模式下边线要做路口裁剪；任何模式下建筑都要躲开路面。
+    _RoadTrim? roadTrim;
+    if (layerRoads || buildingFill || layerBuildingOutline) {
+      roadTrim = _buildRoadTrim(bm.roads, baseLon, baseLat, scaleX, scaleY,
+          scale, roadWidthScale, roadWidthMm);
+    }
     // 文字后置：使底图注记压在底图几何之上（CAD 中后画者在上层）。
     // 注意：整段底图（含其文字）都先于业务层写出，故业务层仍整体置顶（P0-5）。
     // 底图文字缓冲与主体共用句柄分配器（c.h），避免重复句柄。
@@ -2912,27 +3180,26 @@ class DxfExporter {
 
     // —— 建筑（先填充成块、再轮廓；文字后置）——
     if (buildingFill || layerBuildingOutline) {
-      // **建筑随道路加宽向外平移**（v3.30）。
+      // **建筑躲开路面**（v3.30 引入，v3.41 修正启用条件）。
       //
-      // 用户口径："如果道路加宽，就把建筑矢量轮廓往道路两侧移动一点，
-      // 道路加宽多少，建筑矢量轮廓就移动多少。"
+      // 用户口径："道路穿建筑而过" —— 默认导出时建筑整个压在路面上。
       //
       // 语义：路面在线性符号里只占一条线宽，但真实路面占了 land 宽度。
-      // 加宽后如果不推建筑，建筑会压到路面上。这里把**离路面最近的顶点**
-      // 沿"从路面指向建筑"的方向推开，推开量 = 该处路面半宽的增量。
+      // 这里把建筑按"建筑质心 → 最近路面点"的方向整体推开，推到刚好
+      // 让开路面（半宽 + 0.3mm 印刷余量）。
       //
-      // 实现取近似（够用且快）：
-      //   · 只在 `roadWidthScale > 1` 时启用；
-      //   · 推开量 = (该处道路半宽) - (该处道路默认半宽)，即"加宽了多少"；
-      //   · 方向用"建筑质心 → 最近路面点"的方向，整栋统一平移，
-      //     避免逐顶点推导致建筑变形。
-      final pushM = roadWidthScale > 1.0;
+      // v3.41 的关键修正：旧实现只在 `roadWidthScale > 1`（用户手动加宽）
+      // 时才启用，于是**默认配置下建筑完全不推离**。新实现无条件做，判据
+      // 改成几何事实（质心是否落在路面内），与"是否加宽"解耦。
+      //
+      // 仍取近似（够用且快）：方向用质心方向、整栋统一平移，避免逐顶点
+      // 推导致建筑变形；推出量超过 6mm 纸面就放弃（数据本身有问题时不动）。
       final ringsPerBld = <List<List<List<double>>>>[];
       for (final b in bm.buildings) {
         var rings = _toCartRings(b, baseLon, baseLat, scaleX, scaleY);
-        if (pushM && rings.isNotEmpty) {
-          rings = _pushBuildingOffRoads(rings, bm.roads, baseLon, baseLat,
-              scaleX, scaleY, scale, roadWidthScale);
+        final trim = roadTrim;
+        if (trim != null && rings.isNotEmpty) {
+          rings = _pushBuildingOffRoads(rings, trim);
         }
         ringsPerBld.add(rings);
         for (final ring in rings) {
@@ -2975,12 +3242,18 @@ class DxfExporter {
     }
 
     // —— 道路（单线/双线可选，按等级分级；路名居中标注可按等级过滤）——
+    //
+    // **路口修剪（v3.41）**：空心双线模式先统一把全部路面收成"胶囊带索引"，
+    // 再逐条画；画的时候把落在别家路面里的边线段裁掉。旧实现每条路各自画两条
+    // 偏移线、从不与相邻道路求交，于是每个路口都有四条边线穿过去 —— 这就是
+    // 用户说的"交叉口衔接处多余的没有修剪掉"。
     if (layerRoads) {
-      for (final r in bm.roads) {
-        _appendRoadDualAndCenter(c, lc, r, baseLon, baseLat, scaleX,
+      final trim = roadStyle == RoadStyle.hollow ? roadTrim : null;
+      for (var ri = 0; ri < bm.roads.length; ri++) {
+        _appendRoadDualAndCenter(c, lc, bm.roads[ri], baseLon, baseLat, scaleX,
             scaleY, scale, version, acc, showMinorRoadNames, placer,
             roadStyle: roadStyle, roadWidthScale: roadWidthScale,
-            roadWidthMm: roadWidthMm);
+            roadWidthMm: roadWidthMm, trim: trim, roadIdx: ri);
       }
     }
 
@@ -3009,45 +3282,25 @@ class DxfExporter {
     return [acc.minX, acc.minY, acc.maxX, acc.maxY];
   }
 
-  /// 道路双线描边分级画法（**不再 1:1 用真实路宽**；中心线已按新规格删除）。
-  /// 路名默认只标 trunk/primary/secondary/tertiary/residential；
-  /// [showMinorRoadNames] 为 true 时 service/other 也标。
-  /// 把一栋建筑整体沿"远离最近道路"的方向平移（v3.30）。
+  /// 把被路面压住的建筑整体推出路面（v3.41 重写）。
   ///
-  /// ## 为什么整栋平移而不是逐顶点
-  /// 逐顶点推会把矩形拉成梯形/菱形 —— 建筑轮廓必须保持形状。
-  /// 现场要的是"房子别压在路上"，位置略移一点点完全可接受。
+  /// **为什么重写**：旧实现只在 `roadWidthScale > 1`（用户手动加宽）时才启用，
+  /// 默认配置下 `delta = halfNow - halfDef = 0`，判据 `delta <= 1e-6 → continue`
+  /// 把所有路段都跳过了 —— 于是**默认导出时建筑完全不推离**，道路直接压在建筑上。
+  /// 用户看到的"道路穿建筑而过"就是这么来的。
   ///
-  /// ## 推开量怎么算
-  /// `道路加宽多少，建筑就移动多少`：
-  ///   push = (当前半宽 - 默认半宽)  [图纸单位]
-  /// 用**离该建筑最近的那条路**的等级来定，因为不同等级加宽量不同。
+  /// 新判据不依赖"是否加宽"，而是几何事实：质心到最近中心线的距离若小于
+  /// `halfW + margin`，说明建筑压进路面（或贴得太紧），沿"路面 → 质心"方向
+  /// 推出到刚好让开为止。`margin` 取 0.3mm 纸面，留出印刷时两条线不粘在一起。
   ///
-  /// ## 只在真正压线时推
-  /// 建筑离路面还有余量（> 当前半宽）时不推，保持原样。
+  /// 推出量超过 6mm 纸面就不动：最宽等级 trunk 半宽 0.90mm，即使 roadWidthScale=3
+  /// 也只有 2.7mm，需要推 6mm 以上的情况只可能是数据本身把建筑画在路中央，
+  /// 整栋硬挪反而制造更大的错位。
   static List<List<List<double>>> _pushBuildingOffRoads(
     List<List<List<double>>> rings,
-    List<RoadPoly> roads,
-    double baseLon,
-    double baseLat,
-    double scaleX,
-    double scaleY,
-    int scale,
-    double widthScale,
+    _RoadTrim trim,
   ) {
-    if (roads.isEmpty || rings.isEmpty) return rings;
-
-    // **只保留"被加宽"的道路参与求最近（v3.39 性能）**
-    //
-    // 原实现对全部道路做距离扫描，但循环里第一件事就是 `delta <= 1e-6 → continue`
-    // 跳过没加宽的等级。图幅模式内置路网上万条，等于白白扫了几十万次线段。
-    // 先过滤再加宽，逻辑等价、开销降到 1/N。
-    final widened = <RoadPoly>[
-      for (final r in roads)
-        if (_roadHalfWidthM(r.grade, scale) * (widthScale - 1.0) > 1e-6) r
-    ];
-    if (widened.isEmpty) return rings;
-    roads = widened;
+    if (rings.isEmpty || trim.bands.isEmpty) return rings;
 
     // 建筑质心（图纸坐标）
     var cx = 0.0, cy = 0.0;
@@ -3063,59 +3316,44 @@ class DxfExporter {
     cx /= n;
     cy /= n;
 
-    // 找最近的道路线段，取该处等级
+    const margin = 0.3; // 纸面毫米
     var bestD2 = double.infinity;
     var pushX = 0.0, pushY = 0.0;
 
-    for (final r in roads) {
-      final halfNow = _roadHalfWidthM(r.grade, scale) * widthScale;
-      final halfDef = _roadHalfWidthM(r.grade, scale);
-      final delta = halfNow - halfDef;
-      if (delta <= 1e-6) continue; // 该等级没加宽
-
-      final pts = <List<double>>[
-        for (final p in r.pts)
-          [(p[1] - baseLon) * scaleX, (p[0] - baseLat) * scaleY]
-      ];
-      for (var i = 1; i < pts.length; i++) {
-        final a = pts[i - 1], b = pts[i];
-        final dx = b[0] - a[0], dy = b[1] - a[1];
-        final l2 = dx * dx + dy * dy;
-        if (l2 < 1e-12) continue;
-        var t = ((cx - a[0]) * dx + (cy - a[1]) * dy) / l2;
-        if (t < 0) t = 0;
-        if (t > 1) t = 1;
-        final px = a[0] + dx * t, py = a[1] + dy * t;
-        final ddx = cx - px, ddy = cy - py;
-        final d2 = ddx * ddx + ddy * ddy;
-        if (d2 < bestD2) {
-          bestD2 = d2;
-          // 方向：从路面点指向建筑质心（已归一化）
-          final d = math.sqrt(d2);
-          if (d > 1e-9) {
-            pushX = ddx / d * delta;
-            pushY = ddy / d * delta;
-          } else {
-            // 质心正压在路面上：往上推（任意稳定方向）
-            pushX = 0;
-            pushY = delta;
-          }
-        }
+    for (final c in trim.grid.near3(cx, cy)) {
+      final band = trim.bands[c[0]];
+      if (band.halfW <= 1e-6) continue;
+      final a = band.pts[c[1]], b = band.pts[c[1] + 1];
+      final dx = b[0] - a[0], dy = b[1] - a[1];
+      final l2 = dx * dx + dy * dy;
+      if (l2 < 1e-12) continue;
+      var t = ((cx - a[0]) * dx + (cy - a[1]) * dy) / l2;
+      if (t < 0) t = 0;
+      if (t > 1) t = 1;
+      final px = a[0] + dx * t, py = a[1] + dy * t;
+      final ddx = cx - px, ddy = cy - py;
+      final d2 = ddx * ddx + ddy * ddy;
+      if (d2 >= bestD2) continue;
+      bestD2 = d2;
+      final d = math.sqrt(d2);
+      final need = band.halfW + margin - d;
+      if (need <= 1e-6) {
+        pushX = 0;
+        pushY = 0;
+      } else if (d > 1e-9) {
+        pushX = ddx / d * need;
+        pushY = ddy / d * need;
+      } else {
+        // 质心正压在中心线上：往上推（任意稳定方向）
+        pushX = 0;
+        pushY = band.halfW + margin;
       }
     }
 
     if (bestD2 == double.infinity) return rings;
-    // **推离距离判据收紧到 3mm 纸面（v3.39）**
-    //
-    // 图纸坐标单位数值上等于纸面毫米（scaleX = 米 / (scale/1000)，
-    // 而 1:1000 下 1 米 = 1mm），所以旧代码的 60.0 就是 **60mm 纸面**：
-    // A3 图（420mm 宽）上等于把 1/7 幅面内的建筑全都平移过去，
-    // 表现为"整片建筑错位/图面不协调"。改成 3mm 以内才推，
-    // 只处理真正压线的建筑。
-    final bestD = math.sqrt(bestD2);
-    final maxPushUnits = _mmOf(3.0, scale);
-    if (bestD > maxPushUnits) return rings;
     if (pushX.abs() < 1e-9 && pushY.abs() < 1e-9) return rings;
+    final pushLen = math.sqrt(pushX * pushX + pushY * pushY);
+    if (pushLen > 6.0) return rings;
 
     return [
       for (final ring in rings)
@@ -3146,6 +3384,13 @@ class DxfExporter {
     /// 用户口径："路的宽度可以自定义，道路的线宽永远是 0.000"。
     /// 空心模式下两条边线各偏移本值的一半；线宽组码一律不写（=0.000）。
     double? roadWidthMm,
+
+    /// 路口修剪上下文（v3.41）。非空且为空心模式时，左右边线会按
+    /// "落在别家路面内"的区间切开，避免四条边线在路口互相穿透。
+    _RoadTrim? trim,
+
+    /// 本路在 `trim.bands` 中的下标（用于排除自身）。
+    int roadIdx = -1,
   }) {
     final cart = <List<double>>[
       for (final p in rp.pts) [(p[1] - baseLon) * scaleX, (p[0] - baseLat) * scaleY]
@@ -3176,14 +3421,27 @@ class DxfExporter {
       // 细线：零宽度单线
       _appendPolyline(c, 'DaoLu', simp, version: version);
     } else if (halfW > 1e-6) {
-      // 空心（默认）：左右两条平行边线，中间不填充
-      final left = _offsetPolyline(simp, halfW);
-      final right = _offsetPolyline(simp, -halfW);
-      if (left.length >= 2) {
-        _appendPolyline(c, 'DaoLuBian', left, version: version);
-      }
-      if (right.length >= 2) {
-        _appendPolyline(c, 'DaoLuBian', right, version: version);
+      // 空心（默认）：左右两条平行边线，中间不填充。
+      //
+      // **斜接补偿（v3.41）**：旧 `_offsetPolyline` 用"两侧法向归一化均值"平移，
+      // 90° 弯处边线到中心线的垂距只剩 71%（=cos45°），边线变窄压线 —— 这就是
+      // 用户说的"还有一点点偏差"。`_offsetPolylineMiter` 按 1/cos(θ/2) 放大。
+      final left = _offsetPolylineMiter(simp, halfW);
+      final right = _offsetPolylineMiter(simp, -halfW);
+      if (trim != null && roadIdx >= 0) {
+        for (final seg in _clipRoadEdge(left, trim, roadIdx, halfW)) {
+          _appendPolyline(c, 'DaoLuBian', seg, version: version);
+        }
+        for (final seg in _clipRoadEdge(right, trim, roadIdx, halfW)) {
+          _appendPolyline(c, 'DaoLuBian', seg, version: version);
+        }
+      } else {
+        if (left.length >= 2) {
+          _appendPolyline(c, 'DaoLuBian', left, version: version);
+        }
+        if (right.length >= 2) {
+          _appendPolyline(c, 'DaoLuBian', right, version: version);
+        }
       }
     }
 

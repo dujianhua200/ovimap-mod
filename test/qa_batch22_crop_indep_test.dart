@@ -303,10 +303,15 @@ void main() {
       // 地名 1:1（每个地名一条 DiMing 文字），可精确对齐
       expect(_cntLayer(e, 'DiMing'), cropped.places.length,
           reason: 'DiMing 实体数应等于裁剪后地名数');
-      // 道路双线：每条裁剪后道路 ≤ 2 条 DaoLuBian
+      // 道路双线（v3.41）：每条路原本 2 条边线，但路口修剪会把一条边线
+      // 在「被交叉道路路面遮挡」处切段，实体数会多于 2N。这里改为
+      // 判「至少 2N（不该丢边线）」+「不超过 8N（切段不至于无限膨胀）」。
       expect(_cntLayer(e, 'DaoLuBian'),
-          lessThanOrEqualTo(2 * cropped.roads.length),
-          reason: 'DaoLuBian 不应超过裁剪后道路数的 2 倍');
+          greaterThanOrEqualTo(2 * cropped.roads.length),
+          reason: 'DaoLuBian 不应少于裁剪后道路数的 2 倍（每条路左右两条边线）');
+      expect(_cntLayer(e, 'DaoLuBian'),
+          lessThanOrEqualTo(8 * cropped.roads.length),
+          reason: 'DaoLuBian 切段后不应超过裁剪后道路数的 8 倍');
       expect(r.warnings.any((w) => w.contains('范围内无底图数据')), isFalse,
           reason: '市区有数据，不应出现「无底图数据」警告');
 
