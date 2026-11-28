@@ -75,7 +75,8 @@ void main() {
     expect(idx.lonMax, greaterThan(115.55));
     expect(idx.latMax, greaterThan(32.55));
 
-    // 20.5 万条道路只有约 2000 个不同路名
+    // 13 万条道路只有约 2000 个不同路名（v3.40 链式合并后有名要素减少，
+    // 但不同路名总数基本不变：合并把无名碎段并到有名字的身上）
     expect(idx.nameCount, greaterThan(1500));
     expect(idx.nameCount, lessThan(3000));
   });
@@ -129,7 +130,8 @@ void main() {
       for (final r in roads) {
         expect(rids.add(r.rid), isTrue, reason: 'rid ${r.rid} 出现两次，去重失效');
       }
-      expect(roads.length, greaterThan(100000), reason: '全市应有 10 万条以上');
+      // v3.40 去掉跨瓦片重复 + 链式合并后全市 104342 条（合并前 163200）
+      expect(roads.length, greaterThan(90000), reason: '全市应有 9 万条以上');
     });
   });
 

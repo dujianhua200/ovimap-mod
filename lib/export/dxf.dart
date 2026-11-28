@@ -121,7 +121,7 @@ enum RoadStyle {
 /// [frame]    **按图幅覆盖范围** —— 图框内整幅图都有底图（商业出图口径）。
 enum BasemapCoverage { corridor, frame }
 
-/// 注记避让器：用"已占用矩形"做碰撞检测 + 同名去重。
+/// 注记避让器：用"已占用矩形"做碰撞检测 + 同名去重 + 同名限次。
 ///
 /// 商业出图里，注记不许压建筑、不许互相压字。v3.39 把实现从
 /// "List 线性扫描 + List.contains 查重"改成**均匀网格哈希**：
@@ -142,8 +142,22 @@ class _LabelPlacer {
   /// 格子键 → 该格内的矩形（[x0,y0,x1,y1]）。
   final Map<int, List<List<double>>> _grid = <int, List<List<double>>>{};
 
-  /// 已占用的注记名（同名只允许出现一次）。
-  final Set<String> _names = <String>{};
+  /// 已占用的注记名 → 已出现次数。
+  ///
+  /// **不是"只允许一次"**（v3.40 修正）：一条国道横穿整幅图，只标一处
+  /// 读者反而找不到；但也不能像旧版那样每隔 200 米标一次——实测
+  /// 内置路网里「320省道」一条就在信阳全境产生 514 处注记、
+  /// 「312国道」482 处，图面密到看不清，这是用户说的"乱七八糟"。
+  ///
+  /// 现在按 [maxPerName] 限次（默认 3：首段、中段、末段各一），
+  /// 与商业地形图一致。
+  final Map<String, int> _names = <String, int>{};
+
+  /// 同一路名在**一幅图**内最多出现几次。
+  ///
+  /// 3 的依据：A3 图幅 1:3000 时一幅图约 1.3km 见方，一条主干道通常
+  /// 贯穿全幅，两端 + 中段各标一次足够辨识；再密就是噪音。
+  static const int maxPerName = 3;
 
   /// 已占用矩形总数（诊断用）。
   int get placedCount {
@@ -175,7 +189,10 @@ class _LabelPlacer {
       cx + bw / 2,
       cy + bh / 2,
     ];
-    if (name.isNotEmpty && !_names.add(name)) return false;
+    if (name.isNotEmpty) {
+      final used = _names[name] ?? 0;
+      if (used >= maxPerName) return false;
+    }
 
     final gx0 = _gx(r[0]), gx1 = _gx(r[2]);
     final gy0 = _gy(r[1]), gy1 = _gy(r[3]);
@@ -186,10 +203,7 @@ class _LabelPlacer {
         for (final p in bucket) {
           final overlap =
               !(r[2] < p[0] || r[0] > p[2] || r[3] < p[1] || r[1] > p[3]);
-          if (overlap) {
-            if (name.isNotEmpty) _names.remove(name); // 回滚名字占用
-            return false;
-          }
+          if (overlap) return false;
         }
       }
     }
@@ -201,6 +215,8 @@ class _LabelPlacer {
         (_grid[_key(gx, gy)] ??= <List<double>>[]).add(r);
       }
     }
+    // 占位成功才记名次（回滚不需要：上面任何一步 return false 都没写过 _names）
+    if (name.isNotEmpty) _names[name] = (_names[name] ?? 0) + 1;
     return true;
   }
 }
@@ -3216,7 +3232,16 @@ class DxfExporter {
     // 所以「200 米」要先换算成图纸单位；否则 1:3000 下会被当成
     // 200 单位 = 600 米，路名数量会少 3 倍。
     final spacingUnits = 200.0 / (scale / 1000.0);
-    final n = math.max(1, (totalLen / spacingUnits).round());
+    var n = math.max(1, (totalLen / spacingUnits).round());
+    // 有名道路：把处数压到同名上限（v3.40）。
+    //
+    // 只靠 placer 的同名限次还不够——那会让接受的 3 处全挤在起点附近
+    // （循环从 i=1 往后走，前三处就吃满配额）。先把 n 压到 3，
+    // 三处就均布在 1/6、1/2、5/6 弧长处：两头看得见、中间也看得见，
+    // 这才是一条路穿整幅图该有的标注位置。
+    if (name.isNotEmpty && n > _LabelPlacer.maxPerName) {
+      n = _LabelPlacer.maxPerName;
+    }
     var walked = 0.0; // 已走过弧长
     var idx = 1;
     for (var i = 1; i < pts.length && idx <= n; i++) {
@@ -3240,7 +3265,10 @@ class DxfExporter {
         final off = halfW + h * 0.7;
         final tx = px + nx * off;
         final ty = py + ny * off;
-        if (placer.tryAdd(tx, ty, _textWidthM(name, h), h, angleDeg: angle)) {
+        // name 必须传：同名限次（_LabelPlacer.maxPerName）靠它生效。
+        // 旧版没传 → 一条「320省道」在全境标了 514 次，就是用户说的"乱七八糟"。
+        if (placer.tryAdd(tx, ty, _textWidthM(name, h), h,
+            angleDeg: angle, name: name)) {
           _text(lc, 'DaoLu', tx, ty, h, name,
               angle: angle, styleName: 'SongTi', centered: true);
         }

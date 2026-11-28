@@ -39,7 +39,7 @@ import 'road_index.dart';
 /// "明明有数据的地方"判成没数据，兜底被静默跳过。
 ///
 /// 实测（assets/buildings/*.geojson.gz 真实包围盒）：
-///   roads     lon 113.703~115.593  lat 31.192~32.588  （v3.38 高德矢量瓦片，205484 条）
+///   roads     lon 113.703~115.593  lat 31.192~32.588  （v3.40 去重+链式合并，131239 条）
 ///   places    lon 113.699~115.600  lat 31.200~32.596
 ///   buildings lon 113.723~115.932  lat 31.393~32.664
 ///
@@ -70,7 +70,22 @@ const double kBundledLatMax = 32.58;
 ///     判据：以高德 /v3/direction/driving 返回的精确 GCJ 折线为真值，
 ///     修正后平均距离 0.0~0.2m；OSM 路网反向匹配中位 2.8m。
 ///     205484 条，gz 11.0MB。
-const int kBundledBasemapVersion = 5;
+/// v6：**道路去重 + 链式合并**（用户反馈"道路有很多重复的，乱七八糟"）。
+///     ① `scripts/dedup_roads.py`：高德 z14 瓦片按瓦片边界裁剪，同一条路在
+///        相邻两片各存一份、端点相差中位 7.7m —— 抓取阶段的 edge_key（首末点
+///        取整）对这种差异完全无效。改用「8m 容差 + 双向覆盖率 ≥0.80」增量
+///        配对，去掉 2569 条 / 871km（占长度 1.08%）；容差必须 ≤8m，实测
+///        20.4% 的道路在 6~25m 内有同等级平行邻居（上下行分隔带），再大就
+///        会误合并分离式车行道。
+///     ② `scripts/chain_roads.py`：把首尾相接、等级+路名+mainKey 全同、
+///        且连接点度数恰为 2 的碎段连成整条路。205484 → 202915 → 131239 条
+///        （实体数 -35.3%，**总长度变化 0.00%** 即几何等价）；平均段长
+///        394m→609m，<20m 的碎段 16071 → 6289 条。
+///        意义：DXF 双线是逐段算法线（`_offsetPolyline`），段越碎接缝越多，
+///        两条边线在接缝处各自拐弯对不上 —— 这就是"乱七八糟"的机制。
+///        路名也按段重复标注，合并后按整条路均匀布点（注记总数基本不变）。
+///     数据 131239 条 / 161 万点，gz 10.7MB，索引 .ovrd 9.9MB（cell 0.08）。
+const int kBundledBasemapVersion = 6;
 
 const String kBundledBuildingsAsset = 'assets/buildings/xinyang.geojson.gz';
 
@@ -84,7 +99,7 @@ const String kBundledRoadsAsset = 'assets/buildings/xinyang_roads.geojson.gz';
 ///
 /// 与建筑同思路（见 [kBundledBuildingsIndexAsset]）：旧 GeoJSON 路径每次
 /// 导出都要 `gzip.decode(10.5MB)` + `jsonDecode` 20.5 万条道路 / 173 万点，
-/// 实测单次 3~6 秒；索引版只解压命中网格（A3 图幅约 1 块 / 9KB）。
+/// 实测单次 3~6 秒；索引版只解压命中网格（A3 图幅 1 块 / 约 89KB，8~10ms）。
 /// 由 `tool/build_road_index.py` 生成；缺失时自动回退 [kBundledRoadsAsset]。
 const String kBundledRoadsIndexAsset = 'assets/buildings/xinyang_roads.ovrd';
 const String kBundledPlacesAsset = 'assets/buildings/xinyang_places.geojson.gz';
