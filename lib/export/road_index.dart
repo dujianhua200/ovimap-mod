@@ -64,8 +64,6 @@ class RoadIndex {
     this._nRows,
     this._indexOfs,
     this._dataOfs,
-    this._tableOfs,
-    this._tableLen,
   );
 
   /// 解析文件头并读字符串表。格式不对返回 null（调用方回退 GeoJSON 路径）。
@@ -109,8 +107,8 @@ class RoadIndex {
       }
     }
 
-    final idx = RoadIndex._(bytes, cell, lonMin, latMin, nCols, nRows,
-        indexOfs, dataOfs, tableOfs, tableLen);
+    final idx = RoadIndex._(
+        bytes, cell, lonMin, latMin, nCols, nRows, indexOfs, dataOfs);
     idx._names = names;
     idx._highways = highways;
     return idx;
@@ -124,8 +122,6 @@ class RoadIndex {
   final int _nRows;
   final int _indexOfs;
   final int _dataOfs;
-  final int _tableOfs;
-  final int _tableLen;
 
   /// 定点单位：整数 ÷ 1e7 = 度
   static const double _microDeg = 10000000.0;

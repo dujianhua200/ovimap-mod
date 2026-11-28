@@ -51,6 +51,8 @@ BINARY_EXT = {
     '.so', '.dll', '.dylib', '.exe', '.bin', '.woff', '.woff2', '.ttf',
     # v3.28：建筑分块二进制索引（自带二进制头部 + gzip 块，不是文本）
     '.ovbld',
+    # v3.39：路网分块二进制索引（同上：OVRD 头 + int32 坐标 + gzip 块）
+    '.ovrd',
 }
 
 # 按文件名精确跳过的（无扩展名或有特殊用途）
