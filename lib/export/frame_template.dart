@@ -48,8 +48,16 @@ class FrameText extends FrameShape {
   final double x, y, h, rot;
   final String text;
   final String layer;
-  const FrameText(
-      this.x, this.y, this.h, this.rot, this.text, this.layer);
+
+  /// 是否来自 DXF 的 `MTEXT`。
+  ///
+  /// MTEXT 的组码 10/20 是**附着点**（本图框的图签行标签都是「左上」附着，
+  /// 71=1），不是基线；TEXT 的 10/20 才是基线。导出时要区别对待，
+  /// 否则整行文字会高出半个字高、压到上一格的线。
+  final bool mtext;
+
+  const FrameText(this.x, this.y, this.h, this.rot, this.text, this.layer,
+      {this.mtext = false});
 }
 
 /// 解析好的图框。
@@ -61,7 +69,16 @@ class FrameTemplate {
   final double width;
   final double height;
 
-  const FrameTemplate(this.shapes, this.width, this.height);
+  /// 是否把图签文字吸附到所在格的几何中心。
+  ///
+  /// 原版图框（用户给的 `图框.dxf`）整张是一个块参照，图签文字本来就按
+  /// 格子设计好位置、写在自己的附着点上 —— 再吸附反而会破坏它
+  /// （实测「审  核」被吸到「部门主管」那一格）。这类图框按**原始坐标**
+  /// 落笔即可，所以标记为 false。
+  final bool snapText;
+
+  const FrameTemplate(this.shapes, this.width, this.height,
+      {this.snapText = true});
 
   /// 可用内容区（留出图框边距 + 图签/图例区）。
   ///
@@ -88,10 +105,11 @@ class FrameTemplate {
           moved.add(FrameCircle(cc.cx + dx, cc.cy + dy, cc.r, cc.layer));
         case FrameText t:
           moved.add(FrameText(
-              t.x + dx, t.y + dy, t.h, t.rot, t.text, t.layer));
+              t.x + dx, t.y + dy, t.h, t.rot, t.text, t.layer,
+              mtext: t.mtext));
       }
     }
-    return FrameTemplate(moved, width, height);
+    return FrameTemplate(moved, width, height, snapText: snapText);
   }
 
   /// 从图框里**实测**图签格位（v3.21）。
@@ -192,12 +210,13 @@ class FrameTemplate {
     for (final s in shapes) {
       if (s is FrameText && s.text.contains(placeholder)) {
         out.add(FrameText(s.x, s.y, s.h, s.rot,
-            s.text.replaceAll(placeholder, newName.trim()), s.layer));
+            s.text.replaceAll(placeholder, newName.trim()), s.layer,
+            mtext: s.mtext));
       } else {
         out.add(s);
       }
     }
-    return FrameTemplate(out, width, height);
+    return FrameTemplate(out, width, height, snapText: snapText);
   }
 }
 
@@ -430,7 +449,7 @@ FrameTemplate parseDxfFrame(String text) {
       final flat = <FrameShape>[];
       _flatten(target.block, blocks, blockInserts, target.x, target.y,
           target.sx, target.sy, target.rot, flat, <String>{});
-      if (flat.isNotEmpty) return _normalize(flat);
+      if (flat.isNotEmpty) return _normalize(flat, snapText: false);
     }
   }
 
@@ -458,7 +477,7 @@ FrameTemplate parseDxfFrame(String text) {
 }
 
 /// 把一组图元归一化：整体平移到左下角在原点，返回 [FrameTemplate]。
-FrameTemplate _normalize(List<FrameShape> flat) {
+FrameTemplate _normalize(List<FrameShape> flat, {bool snapText = true}) {
   if (flat.isEmpty) return const FrameTemplate([], 420, 297);
 
   // 归一化：整体平移到左下角在原点
@@ -505,11 +524,12 @@ FrameTemplate _normalize(List<FrameShape> flat) {
       case FrameCircle c:
         out.add(FrameCircle(c.cx + dx, c.cy + dy, c.r, c.layer));
       case FrameText t:
-        out.add(FrameText(t.x + dx, t.y + dy, t.h, t.rot, t.text, t.layer));
+        out.add(FrameText(t.x + dx, t.y + dy, t.h, t.rot, t.text, t.layer,
+            mtext: t.mtext));
     }
   }
 
-  return FrameTemplate(out, maxX - minX, maxY - minY);
+  return FrameTemplate(out, maxX - minX, maxY - minY, snapText: snapText);
 }
 
 /// 解析 ENTITIES 段（modelspace）里的图元，直接追加到 [out]。
@@ -698,7 +718,7 @@ FrameShape? _shapeFromEntity(
           _cleanMText(e['1'] ?? ''), layer);
     case 'MTEXT':
       return FrameText(d('10'), d('20'), d('40', 2.5), d('50'),
-          _cleanMText(e['1'] ?? ''), layer);
+          _cleanMText(e['1'] ?? ''), layer, mtext: true);
     default:
       return null;
   }
@@ -743,7 +763,7 @@ void _flatten(String name, Map<String, List<FrameShape>> blocks,
             FrameCircle(tx(c.cx, c.cy), ty(c.cx, c.cy), c.r * avg, c.layer));
       case FrameText t:
         out.add(FrameText(tx(t.x, t.y), ty(t.x, t.y), t.h * avg,
-            t.rot + rot, t.text, t.layer));
+            t.rot + rot, t.text, t.layer, mtext: t.mtext));
     }
   }
 
