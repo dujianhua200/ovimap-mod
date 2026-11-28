@@ -210,7 +210,15 @@ enum FrameSize {
   a3('A3 标准图框', 'assets/frames/frame_tk_a3.dxf', 420, 297),
 
   /// 标准 A4 图框（从 A4模板.dxf 提取，297×210）。
-  a4('A4 标准图框', 'assets/frames/frame_tk_a4.dxf', 297, 210);
+  a4('A4 标准图框', 'assets/frames/frame_tk_a4.dxf', 297, 210),
+
+  /// 工程专用（用户提供的整套图框，原版原样，392×281）。
+  ///
+  /// 这份图框在 DXF 里是**一个块参照**：模型空间只有一个 `INSERT`，
+  /// 真正的线框、图签、指北针都在 BLOCKS 段的 `A4图框` 块里。
+  /// 因此不能按「取第一个非空块」的老办法解析（那样会抓到块表里
+  /// 无关的地形/签名块），必须顺着 INSERT 找到目标块再展开。
+  project('工程专用', 'assets/frames/frame_gongcheng.dxf', 392, 281);
 
   const FrameSize(this.label, this.asset, this.widthMm, this.heightMm);
 
@@ -362,10 +370,17 @@ FrameTemplate parseDxfFrame(String text) {
 
   // 收集 BLOCKS 段里每个块的实体
   final blocks = <String, List<FrameShape>>{};
+  // 每个块内部又引用了哪些块（INSERT），带插入点/缩放/旋转
+  final blockInserts = <String, List<_InsertRef>>{};
   // **同时收集 ENTITIES 段**（v3.26）：
   // ezdxf 提取出的图框把实体放在 modelspace 里，不在 BLOCKS。
   // 两种来源都要支持，否则新图框会解析成空。
   final entities = <FrameShape>[];
+  /// 模型空间里的块参照（v3.34）。
+  ///
+  /// 用户给的部分图框在 DXF 里是「模型空间只有一个 INSERT，整张图框是一个块」，
+  /// 这时 ENTITIES 里**没有任何几何**，只有块名 —— 必须顺着它进块里展开。
+  final topInserts = <_InsertRef>[];
   var i = 0;
   while (i < pairs.length) {
     if (pairs[i][0] == '0' && pairs[i][1].trim() == 'SECTION') {
@@ -373,11 +388,11 @@ FrameTemplate parseDxfFrame(String text) {
           ? pairs[i + 1][1].trim()
           : '';
       if (secName == 'BLOCKS') {
-        i = _parseBlocks(pairs, i + 2, blocks);
+        i = _parseBlocks(pairs, i + 2, blocks, blockInserts);
         continue;
       }
       if (secName == 'ENTITIES') {
-        i = _parseEntities(pairs, i + 2, entities);
+        i = _parseEntities(pairs, i + 2, entities, topInserts);
         continue;
       }
     }
@@ -387,6 +402,36 @@ FrameTemplate parseDxfFrame(String text) {
   // modelspace 里有实体 → 直接用它（新提取的 A3/A4 图框走这条）
   if (entities.isNotEmpty) {
     return _normalize(entities);
+  }
+
+  // **模型空间只有一个块参照**（v3.34 工程专用图框走这条）：
+  // 顺着 INSERT 进目标块展开，不在块表里随便挑一个。
+  // 老办法「取第一个非空块」在这里会抓到无关块（地形线、签名块），
+  // 解析出来根本不是图框。
+  if (topInserts.isNotEmpty) {
+    _InsertRef? target;
+    var best = -1;
+    for (final ins in topInserts) {
+      final sh = blocks[ins.block];
+      if (sh == null || sh.isEmpty) continue;
+      // 打分：实体越多越好；带外框多边形（LWPOLYLINE）的再加权，
+      // 保证优先选中真正带图框边框的那个块。
+      var poly = 0;
+      for (final s in sh) {
+        if (s is FramePoly) poly++;
+      }
+      final score = sh.length + poly * 10;
+      if (score > best) {
+        best = score;
+        target = ins;
+      }
+    }
+    if (target != null) {
+      final flat = <FrameShape>[];
+      _flatten(target.block, blocks, blockInserts, target.x, target.y,
+          target.sx, target.sy, target.rot, flat, <String>{});
+      if (flat.isNotEmpty) return _normalize(flat);
+    }
   }
 
   // 否则取 BLOCKS 里"含最多几何"的块（用户手画图框走这条）
@@ -400,9 +445,13 @@ FrameTemplate parseDxfFrame(String text) {
     return const FrameTemplate([], 420, 297);
   }
 
-  // 展开嵌套 INSERT：把内层块图元按插入点平移
+  // 展开嵌套 INSERT：把内层块图元按插入点/缩放/旋转搬进父块坐标系
+  //
+  // 这里**不展开嵌套**（expandNested: false），保持既有图框的原有解析结果，
+  // 避免这次新增图框顺带改动老图框的导出内容。
   final flat = <FrameShape>[];
-  _flatten(rootName, blocks, 0, 0, flat, <String>{});
+  _flatten(rootName, blocks, blockInserts, 0, 0, 1, 1, 0, flat, <String>{},
+      expandNested: false);
 
   if (flat.isEmpty) return const FrameTemplate([], 420, 297);
   return _normalize(flat);
@@ -466,8 +515,8 @@ FrameTemplate _normalize(List<FrameShape> flat) {
 /// 解析 ENTITIES 段（modelspace）里的图元，直接追加到 [out]。
 ///
 /// 与 [_parseBlocks] 的区别：这里没有"块"的概念，遇到 ENDSEC 就结束。
-int _parseEntities(
-    List<List<String>> pairs, int start, List<FrameShape> out) {
+int _parseEntities(List<List<String>> pairs, int start, List<FrameShape> out,
+    List<_InsertRef> inserts) {
   var i = start;
   var entType = '';
   var ent = <String, String>{};
@@ -476,6 +525,15 @@ int _parseEntities(
 
   void flushEnt() {
     if (entType.isEmpty) {
+      ent = {};
+      lwVertices.clear();
+      pendingX = null;
+      return;
+    }
+    // 块参照：本身没有几何，只记下它引用了哪个块 —— 由调用方进块展开。
+    if (entType == 'INSERT') {
+      _collectInsert(ent, inserts);
+      entType = '';
       ent = {};
       lwVertices.clear();
       pendingX = null;
@@ -521,7 +579,8 @@ int _parseEntities(
 }
 
 int _parseBlocks(List<List<String>> pairs, int start,
-    Map<String, List<FrameShape>> out) {
+    Map<String, List<FrameShape>> out,
+    Map<String, List<_InsertRef>> inserts) {
   var i = start;
   String? curName;
   var curShapes = <FrameShape>[];
@@ -535,6 +594,16 @@ int _parseBlocks(List<List<String>> pairs, int start,
 
   void flushEnt() {
     if (curName == null || entType.isEmpty) {
+      entType = '';
+      ent = {};
+      lwVertices.clear();
+      pendingX = null;
+      return;
+    }
+    // 块内嵌块参照：只记录引用关系，展开由 _flatten 统一做（带缩放/旋转）。
+    if (entType == 'INSERT') {
+      final list = inserts.putIfAbsent(curName!, () => <_InsertRef>[]);
+      _collectInsert(ent, list);
       entType = '';
       ent = {};
       lwVertices.clear();
@@ -635,26 +704,84 @@ FrameShape? _shapeFromEntity(
   }
 }
 
-void _flatten(String name, Map<String, List<FrameShape>> blocks, double ox,
-    double oy, List<FrameShape> out, Set<String> seen) {
+/// 把块 [name] 展开成扁平图元，并施加「插入点 + 缩放 + 旋转」变换。
+///
+/// ## 为什么必须处理缩放
+/// 用户的图框块内部还嵌了一个 0.6 倍缩放的符号块（`*X10`）。
+/// 旧实现只做平移、不认缩放，等于把符号按原尺寸贴上去 ——
+/// 位置对、大小错，图面会溢出到框外。旋转同理，这里一并算进去，
+/// 保证「原版图框一个图元都不改」。
+void _flatten(String name, Map<String, List<FrameShape>> blocks,
+    Map<String, List<_InsertRef>> inserts, double ox, double oy,
+    double sx, double sy, double rot,
+    List<FrameShape> out, Set<String> seen,
+    {bool expandNested = true}) {
   if (seen.contains(name)) return;
   final shapes = blocks[name];
   if (shapes == null) return;
   seen.add(name);
+
+  final rad = rot * math.pi / 180;
+  final co = math.cos(rad), si = math.sin(rad);
+  // 先缩放+旋转，再平移到插入点
+  double tx(double x, double y) => ox + x * sx * co - y * sy * si;
+  double ty(double x, double y) => oy + x * sx * si + y * sy * co;
+  final avg = (sx.abs() + sy.abs()) / 2;
+
   for (final s in shapes) {
     switch (s) {
       case FrameLine l:
-        out.add(FrameLine(l.x1 + ox, l.y1 + oy, l.x2 + ox, l.y2 + oy,
-            l.layer));
+        out.add(FrameLine(
+            tx(l.x1, l.y1), ty(l.x1, l.y1),
+            tx(l.x2, l.y2), ty(l.x2, l.y2), l.layer));
       case FramePoly p:
-        out.add(FramePoly(
-            [for (final q in p.pts) [q[0] + ox, q[1] + oy]], p.closed,
-            p.layer));
+        out.add(FramePoly([
+          for (final q in p.pts) [tx(q[0], q[1]), ty(q[0], q[1])]
+        ], p.closed, p.layer));
       case FrameCircle c:
-        out.add(FrameCircle(c.cx + ox, c.cy + oy, c.r, c.layer));
+        out.add(
+            FrameCircle(tx(c.cx, c.cy), ty(c.cx, c.cy), c.r * avg, c.layer));
       case FrameText t:
-        out.add(FrameText(t.x + ox, t.y + oy, t.h, t.rot, t.text, t.layer));
+        out.add(FrameText(tx(t.x, t.y), ty(t.x, t.y), t.h * avg,
+            t.rot + rot, t.text, t.layer));
     }
   }
+
+  // 展开本块内部引用的块参照（递归，带累积变换）
+  //
+  // [expandNested] 只对「新图框」开启：老的 frame_a3.dxf 同样是三层块参照
+  // （11新块 → zw$1E3A → *X1），一旦展开会凭空多出 736 条指北针线，
+  // 改变既有图框的导出结果。既有的东西不碰，这是本次改动的边界。
+  if (expandNested) {
+    for (final ins in inserts[name] ?? const <_InsertRef>[]) {
+      _flatten(ins.block, blocks, inserts, tx(ins.x, ins.y), ty(ins.x, ins.y),
+          sx * ins.sx, sy * ins.sy, rot + ins.rot, out, seen,
+          expandNested: expandNested);
+    }
+  }
+
   seen.remove(name);
+}
+
+/// 一个块参照（INSERT）：引用了哪个块 + 插入点 + 缩放 + 旋转。
+///
+/// 只保存引用关系，不产生几何；真正的图元由 [_flatten] 进目标块里取。
+class _InsertRef {
+  final String block;
+  final double x, y;
+  final double sx, sy;
+  final double rot;
+  const _InsertRef(this.block, this.x, this.y, this.sx, this.sy, this.rot);
+}
+
+/// 把一个 INSERT 实体的组码读成 [_InsertRef]。
+///
+/// 组码 41/42 是 X/Y 缩放，缺省为 1（不写就代表 1，不能当 0 处理，
+/// 否则整块会被缩成一点）。
+void _collectInsert(Map<String, String> e, List<_InsertRef> into) {
+  final name = (e['2'] ?? '').trim();
+  if (name.isEmpty) return;
+  double n(String k, [double def = 0]) =>
+      double.tryParse((e[k] ?? '').trim()) ?? def;
+  into.add(_InsertRef(name, n('10'), n('20'), n('41', 1), n('42', 1), n('50')));
 }

@@ -59,6 +59,21 @@ void main() {
       expect(f.width, closeTo(392, 2));
       expect(f.height, closeTo(281, 2));
     });
+
+    test('工程专用（原版块参照图框）392×281', () {
+      final f = parseDxfFrame(
+          latin1.decode(File('assets/frames/frame_gongcheng.dxf')
+              .readAsBytesSync()));
+      // ignore: avoid_print
+      print('project: ${f.width.toStringAsFixed(1)} × '
+          '${f.height.toStringAsFixed(1)}  shapes=${f.shapes.length}');
+      // 尺寸必须与用户原图框一致，不能因为解析走样
+      expect(f.width, closeTo(392, 2));
+      expect(f.height, closeTo(281, 2));
+      // 整张图框是一个块参照：必须顺着 INSERT 进块里展开，
+      // 解析不出内容（shapes 为空）说明块选择逻辑又退化成"抓第一个块"了
+      expect(f.shapes.length, greaterThan(60));
+    });
   });
 
   group('用不同图框导出都合法', () {
@@ -66,6 +81,7 @@ void main() {
       'frame_a3.dxf',
       'frame_tk_a3.dxf',
       'frame_tk_a4.dxf',
+      'frame_gongcheng.dxf',
     ]) {
       test('$asset 导出结构校验通过', () async {
         final f = parseDxfFrame(
@@ -100,8 +116,8 @@ void main() {
   });
 
   group('FrameSize 枚举', () {
-    test('三种规格齐全，尺寸与资源对应', () {
-      expect(FrameSize.values.length, 3);
+    test('四种规格齐全，尺寸与资源对应', () {
+      expect(FrameSize.values.length, 4);
       for (final s in FrameSize.values) {
         expect(File(s.asset).existsSync(), isTrue,
             reason: '${s.label} 的资源 ${s.asset} 应存在');
