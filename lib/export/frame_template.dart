@@ -56,8 +56,15 @@ class FrameText extends FrameShape {
   /// 否则整行文字会高出半个字高、压到上一格的线。
   final bool mtext;
 
+  /// 文字宽度因子（DXF 组码 41）。
+  ///
+  /// 用户图框里的字是**压扁**过的：`HZ` 样式宽度 0.7、`宋体` 样式 0.8。
+  /// 导出若不带上这个系数，字宽会多出 25%~43%，右侧直接顶出图框边界
+  /// （用户截图里「单项负责人」「专业负责人」「公司名」出框就是这个）。
+  final double widthFactor;
+
   const FrameText(this.x, this.y, this.h, this.rot, this.text, this.layer,
-      {this.mtext = false});
+      {this.mtext = false, this.widthFactor = 1.0});
 }
 
 /// 解析好的图框。
@@ -106,7 +113,7 @@ class FrameTemplate {
         case FrameText t:
           moved.add(FrameText(
               t.x + dx, t.y + dy, t.h, t.rot, t.text, t.layer,
-              mtext: t.mtext));
+              mtext: t.mtext, widthFactor: t.widthFactor));
       }
     }
     return FrameTemplate(moved, width, height, snapText: snapText);
@@ -211,7 +218,7 @@ class FrameTemplate {
       if (s is FrameText && s.text.contains(placeholder)) {
         out.add(FrameText(s.x, s.y, s.h, s.rot,
             s.text.replaceAll(placeholder, newName.trim()), s.layer,
-            mtext: s.mtext));
+            mtext: s.mtext, widthFactor: s.widthFactor));
       } else {
         out.add(s);
       }
@@ -400,18 +407,27 @@ FrameTemplate parseDxfFrame(String text) {
   /// 用户给的部分图框在 DXF 里是「模型空间只有一个 INSERT，整张图框是一个块」，
   /// 这时 ENTITIES 里**没有任何几何**，只有块名 —— 必须顺着它进块里展开。
   final topInserts = <_InsertRef>[];
+  /// 字体样式名 → 宽度因子（组码 41）。
+  ///
+  /// 用户图框的字是压扁的：`HZ` 样式宽 0.7、`宋体` 宽 0.8。
+  /// 不把这个系数带进导出，字宽会多出 25%~43%，右侧顶出框。
+  final styleWidths = <String, double>{};
   var i = 0;
   while (i < pairs.length) {
     if (pairs[i][0] == '0' && pairs[i][1].trim() == 'SECTION') {
       final secName = (i + 1 < pairs.length && pairs[i + 1][0] == '2')
           ? pairs[i + 1][1].trim()
           : '';
+      if (secName == 'TABLES') {
+        _parseStyleWidths(pairs, i + 2, styleWidths);
+        // 继续往下扫（TABLES 里的 STYLE 之后还有别的表）
+      }
       if (secName == 'BLOCKS') {
-        i = _parseBlocks(pairs, i + 2, blocks, blockInserts);
+        i = _parseBlocks(pairs, i + 2, blocks, blockInserts, styleWidths);
         continue;
       }
       if (secName == 'ENTITIES') {
-        i = _parseEntities(pairs, i + 2, entities, topInserts);
+        i = _parseEntities(pairs, i + 2, entities, topInserts, styleWidths);
         continue;
       }
     }
@@ -525,18 +541,48 @@ FrameTemplate _normalize(List<FrameShape> flat, {bool snapText = true}) {
         out.add(FrameCircle(c.cx + dx, c.cy + dy, c.r, c.layer));
       case FrameText t:
         out.add(FrameText(t.x + dx, t.y + dy, t.h, t.rot, t.text, t.layer,
-            mtext: t.mtext));
+            mtext: t.mtext, widthFactor: t.widthFactor));
     }
   }
 
   return FrameTemplate(out, maxX - minX, maxY - minY, snapText: snapText);
 }
 
+/// 从 TABLES 段里扫出所有 `STYLE` 记录的宽度因子（组码 41）。
+///
+/// ## 为什么必须带这个系数
+/// 用户图框的 `HZ` 样式宽度因子是 **0.7**、`宋体` 是 **0.8** —— 图签文字
+/// 是压扁排的。导出时若按默认 1.0 写字，宽度凭空多出 25%~43%，
+/// 「单项负责人」「专业负责人」「公司名」就会顶出右边框（用户实拍）。
+void _parseStyleWidths(
+    List<List<String>> pairs, int start, Map<String, double> out) {
+  var j = start;
+  while (j < pairs.length) {
+    if (pairs[j][0] == '0' && pairs[j][1].trim() == 'ENDSEC') return;
+    if (pairs[j][0] == '0' && pairs[j][1].trim() == 'STYLE') {
+      String? nm;
+      var w = 1.0;
+      var k = j + 1;
+      while (k < pairs.length && pairs[k][0] != '0') {
+        if (pairs[k][0] == '2') nm = pairs[k][1].trim();
+        if (pairs[k][0] == '41') {
+          w = double.tryParse(pairs[k][1].trim()) ?? 1.0;
+        }
+        k++;
+      }
+      if (nm != null && nm.isNotEmpty && w > 0) out[nm] = w;
+      j = k;
+      continue;
+    }
+    j++;
+  }
+}
+
 /// 解析 ENTITIES 段（modelspace）里的图元，直接追加到 [out]。
 ///
 /// 与 [_parseBlocks] 的区别：这里没有"块"的概念，遇到 ENDSEC 就结束。
 int _parseEntities(List<List<String>> pairs, int start, List<FrameShape> out,
-    List<_InsertRef> inserts) {
+    List<_InsertRef> inserts, Map<String, double> styleWidths) {
   var i = start;
   var entType = '';
   var ent = <String, String>{};
@@ -559,7 +605,7 @@ int _parseEntities(List<List<String>> pairs, int start, List<FrameShape> out,
       pendingX = null;
       return;
     }
-    final s = _shapeFromEntity(entType, ent, lwVertices);
+    final s = _shapeFromEntity(entType, ent, lwVertices, styleWidths);
     if (s != null) out.add(s);
     entType = '';
     ent = {};
@@ -600,7 +646,8 @@ int _parseEntities(List<List<String>> pairs, int start, List<FrameShape> out,
 
 int _parseBlocks(List<List<String>> pairs, int start,
     Map<String, List<FrameShape>> out,
-    Map<String, List<_InsertRef>> inserts) {
+    Map<String, List<_InsertRef>> inserts,
+    Map<String, double> styleWidths) {
   var i = start;
   String? curName;
   var curShapes = <FrameShape>[];
@@ -630,7 +677,7 @@ int _parseBlocks(List<List<String>> pairs, int start,
       pendingX = null;
       return;
     }
-    final s = _shapeFromEntity(entType, ent, lwVertices);
+    final s = _shapeFromEntity(entType, ent, lwVertices, styleWidths);
     if (s != null) curShapes.add(s);
     entType = '';
     ent = {};
@@ -691,10 +738,14 @@ int _parseBlocks(List<List<String>> pairs, int start,
   return i;
 }
 
-FrameShape? _shapeFromEntity(
-    String type, Map<String, String> e, List<List<double>> lwVertices) {
+FrameShape? _shapeFromEntity(String type, Map<String, String> e,
+    List<List<double>> lwVertices, Map<String, double> styleWidths) {
   double d(String k, [double def = 0]) => double.tryParse(e[k] ?? '') ?? def;
   final layer = e['8'] ?? '0';
+  // 文字宽度因子：TEXT 看实体自己的 41，MTEXT 看它所用样式的 41
+  final wf = type == 'TEXT'
+      ? d('41', 1.0)
+      : (styleWidths[e['7']?.trim()] ?? 1.0);
   switch (type) {
     case 'LINE':
       return FrameLine(d('10'), d('20'), d('11'), d('21'), layer);
@@ -715,10 +766,10 @@ FrameShape? _shapeFromEntity(
       return FrameCircle(d('10'), d('20'), d('40'), layer);
     case 'TEXT':
       return FrameText(d('10'), d('20'), d('40', 2.5), d('50'),
-          _cleanMText(e['1'] ?? ''), layer);
+          _cleanMText(e['1'] ?? ''), layer, widthFactor: wf);
     case 'MTEXT':
       return FrameText(d('10'), d('20'), d('40', 2.5), d('50'),
-          _cleanMText(e['1'] ?? ''), layer, mtext: true);
+          _cleanMText(e['1'] ?? ''), layer, mtext: true, widthFactor: wf);
     default:
       return null;
   }
@@ -763,7 +814,8 @@ void _flatten(String name, Map<String, List<FrameShape>> blocks,
             FrameCircle(tx(c.cx, c.cy), ty(c.cx, c.cy), c.r * avg, c.layer));
       case FrameText t:
         out.add(FrameText(tx(t.x, t.y), ty(t.x, t.y), t.h * avg,
-            t.rot + rot, t.text, t.layer, mtext: t.mtext));
+            t.rot + rot, t.text, t.layer,
+            mtext: t.mtext, widthFactor: t.widthFactor));
     }
   }
 
