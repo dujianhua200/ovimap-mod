@@ -121,15 +121,48 @@ enum RoadStyle {
 /// [frame]    **按图幅覆盖范围** —— 图框内整幅图都有底图（商业出图口径）。
 enum BasemapCoverage { corridor, frame }
 
-/// 注记避让器：用"已占用矩形"做简单碰撞检测。
+/// 注记避让器：用"已占用矩形"做碰撞检测 + 同名去重。
 ///
-/// 商业出图里，注记不许压建筑、不许互相压字。这里按估算的文字包围盒
-/// 做 O(n²) 叠压判定 —— 一幅图的注记量级（几百条）完全够用。
+/// 商业出图里，注记不许压建筑、不许互相压字。v3.39 把实现从
+/// "List 线性扫描 + List.contains 查重"改成**均匀网格哈希**：
+///
+/// 图幅口径（[BasemapCoverage.frame]）下注记量能到几千条（内置路网
+/// 20 万条、村道密集区一幅图几百到上千个路名），旧的 O(n²) 全表扫描
+/// 在导出时是肉眼可见的卡顿。网格化后每条注记只检查邻近 3×3 格，
+/// 平均 O(1)；同名去重用 Set，也是 O(1)。
+///
+/// 网格边长按**字符高度**自适应：注记包围盒通常 1~6 个字宽，
+/// 取 4 倍最大高度做格子，保证一条注记最多跨 2×2 格。
 class _LabelPlacer {
-  final List<List<double>> _placed = <List<double>>[];
-  final List<String> _names = <String>[];
+  _LabelPlacer({double cellSize = 8}) : _cell = cellSize <= 0 ? 8 : cellSize;
+
+  /// 网格边长（米）。构造后不再变化，避免已有记录跨格失效。
+  final double _cell;
+
+  /// 格子键 → 该格内的矩形（[x0,y0,x1,y1]）。
+  final Map<int, List<List<double>>> _grid = <int, List<List<double>>>{};
+
+  /// 已占用的注记名（同名只允许出现一次）。
+  final Set<String> _names = <String>{};
+
+  /// 已占用矩形总数（诊断用）。
+  int get placedCount {
+    var n = 0;
+    for (final v in _grid.values) {
+      n += v.length;
+    }
+    return n;
+  }
+
+  int _key(int gx, int gy) => gx * 73856093 ^ gy * 19349663;
+
+  int _gx(double x) => (x / _cell).floor();
+  int _gy(double y) => (y / _cell).floor();
 
   /// 尝试占位。成功返回 true；与已有注记重叠则返回 false（调用方跳过该注记）。
+  ///
+  /// `cx/cy` 是注记中心，`w/h` 是未旋转的文字包围盒宽高，
+  /// [angleDeg] 参与包围盒放大（旋转后外接矩形）。
   bool tryAdd(double cx, double cy, double w, double h,
       {double angleDeg = 0, String name = ''}) {
     final rad = angleDeg * math.pi / 180;
@@ -142,13 +175,32 @@ class _LabelPlacer {
       cx + bw / 2,
       cy + bh / 2,
     ];
-    if (name.isNotEmpty && _names.contains(name)) return false;
-    for (final p in _placed) {
-      final overlap = !(r[2] < p[0] || r[0] > p[2] || r[3] < p[1] || r[1] > p[3]);
-      if (overlap) return false;
+    if (name.isNotEmpty && !_names.add(name)) return false;
+
+    final gx0 = _gx(r[0]), gx1 = _gx(r[2]);
+    final gy0 = _gy(r[1]), gy1 = _gy(r[3]);
+    for (var gy = gy0; gy <= gy1; gy++) {
+      for (var gx = gx0; gx <= gx1; gx++) {
+        final bucket = _grid[_key(gx, gy)];
+        if (bucket == null) continue;
+        for (final p in bucket) {
+          final overlap =
+              !(r[2] < p[0] || r[0] > p[2] || r[3] < p[1] || r[1] > p[3]);
+          if (overlap) {
+            if (name.isNotEmpty) _names.remove(name); // 回滚名字占用
+            return false;
+          }
+        }
+      }
     }
-    _placed.add(r);
-    if (name.isNotEmpty) _names.add(name);
+
+    // 登记到**它覆盖的每一个格**。只登记中心格会让跨格的长注记
+    // （长路名、斜排路名）在远端漏检，变成叠字。
+    for (var gy = gy0; gy <= gy1; gy++) {
+      for (var gx = gx0; gx <= gx1; gx++) {
+        (_grid[_key(gx, gy)] ??= <List<double>>[]).add(r);
+      }
+    }
     return true;
   }
 }
@@ -2506,16 +2558,46 @@ class DxfExporter {
       {bool style = true,
       double? angle,
       bool liftAboveLine = false,
-      _LabelPlacer? placer}) {
+      _LabelPlacer? placer,
+      bool allowShift = false}) {
     if (text.isEmpty) return;
-    // 避让：同名/相邻注记不叠字（商业出图的基本要求）。
-    if (placer != null &&
-        !placer.tryAdd(cx, cy, _textWidthM(text, h), h,
-            angleDeg: angle ?? 0)) {
-      return;
+    final w = _textWidthM(text, h);
+    var px = cx, py = cy;
+    if (placer != null) {
+      // 避让：同名/相邻注记不叠字（商业出图的基本要求）。
+      //
+      // **允许挪位（v3.39）**：地名注记传 `allowShift: true`。旧实现只在
+      // 正中心试一次，撞上就整条丢掉 —— 密集区里村名几乎全军覆没，
+      // 正是用户说的"村庄名字经常没有"。商业地形图的做法是给几个候选
+      // 位置依次试探（右/左/上/下/四角），第一处不压别的注记就落笔，
+      // 名字至少能出现在附近，而不是消失。
+      final cands = <List<double>>[
+        [cx, cy],
+        if (allowShift) ...[
+          [cx + w * 0.5 + h * 0.8, cy],
+          [cx - w * 0.5 - h * 0.8, cy],
+          [cx, cy + h * 1.3],
+          [cx, cy - h * 1.3],
+          [cx + w * 0.5 + h * 0.6, cy + h * 1.1],
+          [cx - w * 0.5 - h * 0.6, cy + h * 1.1],
+          [cx + w * 0.5 + h * 0.6, cy - h * 1.1],
+          [cx - w * 0.5 - h * 0.6, cy - h * 1.1],
+        ],
+      ];
+      var ok = false;
+      for (final p in cands) {
+        if (placer.tryAdd(p[0], p[1], w, h, angleDeg: angle ?? 0,
+            name: '')) {
+          px = p[0];
+          py = p[1];
+          ok = true;
+          break;
+        }
+      }
+      if (!ok) return;
     }
     // 水平/垂直都交给 CAD 的 72=4（正中）对齐，不再手工估算偏移。
-    _text(c, layer, cx, cy, h, text,
+    _text(c, layer, px, py, h, text,
         style: style,
         centered: true,
         angle: angle,
@@ -2719,6 +2801,40 @@ class DxfExporter {
     final labelBuf = StringBuffer();
     final lc = _Ctx(labelBuf, version, c.h);
 
+    // —— 地名（DiMing 层，字号按级别）—— **必须最先占位**（v3.39）
+    //
+    // ## 为什么排在最前面
+    // [_LabelPlacer] 是"先到先得"的：谁先登记谁占位，后来的重叠注记被丢弃。
+    // 旧顺序是 建筑名 → 路名 → 地名，地名排在最后 —— 城市密集区里路名把
+    // 位置占满，村名/镇名几乎全被 `tryAdd` 拒掉，用户看到的就是
+    // **"村庄名字经常没有"**。地名是读图的第一要素，必须优先。
+    //
+    // 顺序改为 地名 → 路名 → 建筑名：级别高的地名（市/县/镇）先占，
+    // 村/自然村次之，路名在剩余空间里排布，建筑名最后。
+    //
+    // 注：本段只登记占位并写入 [labelBuf]，输出仍是后置的 ——
+    // CAD 里底图注记统一压在底图几何之上，视觉层序不受影响。
+    if (layerPlaces) {
+      // **按级别排序后再画**：市/镇名优先占位，村/自然村名让位，
+      // 保证"重要的名字一定在图上"，不会被一堆小地名先占满。
+      final ranked = List<PlaceFeature>.from(bm.places)
+        ..sort((a, b) => _placeRank(a.level).compareTo(_placeRank(b.level)));
+      for (final p in ranked) {
+        final x = (p.lon - baseLon) * scaleX;
+        final y = (p.lat - baseLat) * scaleY;
+        final h = _mmOf(_placeFontMm(p.level), scale);
+        // 撞位时允许挪到附近（`allowShift`）。
+        //
+        // **不做同名去重**：地名是"点位"而不是"线要素"，重名是常态
+        // （信阳 6832 个自然村里「张庄」「李湾」各出现几十次，分属不同
+        // 地方），按名字去重会把后出现的整片村名抹掉。路名才需要去重
+        // （一条长路沿弧长每 200 米标一次，同名是同一个实体）。
+        _appendTextCentered(lc, 'DiMing', x, y, h, p.name,
+            placer: placer, allowShift: true);
+        acc.add(x, y);
+      }
+    }
+
     // —— 建筑（先填充成块、再轮廓；文字后置）——
     if (buildingFill || layerBuildingOutline) {
       // **建筑随道路加宽向外平移**（v3.30）。
@@ -2811,21 +2927,6 @@ class DxfExporter {
       }
     }
 
-    // —— 地名（DiMing 层，字号按级别）——
-    if (layerPlaces) {
-      // **按级别排序后再画**：市/镇名优先占位，村/自然村名让位，
-      // 保证"重要的名字一定在图上"，不会被一堆小地名先占满。
-      final ranked = List<PlaceFeature>.from(bm.places)
-        ..sort((a, b) => _placeRank(a.level).compareTo(_placeRank(b.level)));
-      for (final p in ranked) {
-        final x = (p.lon - baseLon) * scaleX;
-        final y = (p.lat - baseLat) * scaleY;
-        final h = _mmOf(_placeFontMm(p.level), scale);
-        _appendTextCentered(lc, 'DiMing', x, y, h, p.name, placer: placer);
-        acc.add(x, y);
-      }
-    }
-
     // 底图内部文字统一后置输出（底图几何之上；整体仍先于业务层写出）
     c.sb.write(labelBuf.toString());
 
@@ -2860,6 +2961,18 @@ class DxfExporter {
     double widthScale,
   ) {
     if (roads.isEmpty || rings.isEmpty) return rings;
+
+    // **只保留"被加宽"的道路参与求最近（v3.39 性能）**
+    //
+    // 原实现对全部道路做距离扫描，但循环里第一件事就是 `delta <= 1e-6 → continue`
+    // 跳过没加宽的等级。图幅模式内置路网上万条，等于白白扫了几十万次线段。
+    // 先过滤再加宽，逻辑等价、开销降到 1/N。
+    final widened = <RoadPoly>[
+      for (final r in roads)
+        if (_roadHalfWidthM(r.grade, scale) * (widthScale - 1.0) > 1e-6) r
+    ];
+    if (widened.isEmpty) return rings;
+    roads = widened;
 
     // 建筑质心（图纸坐标）
     var cx = 0.0, cy = 0.0;
@@ -2917,13 +3030,16 @@ class DxfExporter {
     }
 
     if (bestD2 == double.infinity) return rings;
-    // 建筑本来就离得够远（超过当前半宽 + 1mm）→ 不动
+    // **推离距离判据收紧到 3mm 纸面（v3.39）**
+    //
+    // 图纸坐标单位数值上等于纸面毫米（scaleX = 米 / (scale/1000)，
+    // 而 1:1000 下 1 米 = 1mm），所以旧代码的 60.0 就是 **60mm 纸面**：
+    // A3 图（420mm 宽）上等于把 1/7 幅面内的建筑全都平移过去，
+    // 表现为"整片建筑错位/图面不协调"。改成 3mm 以内才推，
+    // 只处理真正压线的建筑。
     final bestD = math.sqrt(bestD2);
-    if (bestD > 1e-9 && bestD > 0) {
-      // 只在"建筑面积与路面重叠"时推：质心距离 < 当前半宽
-      // 这里取一个宽松判据：质心距离 < 3 倍加宽量就不推（避免整体漂移）
-      if (bestD > 60.0) return rings;
-    }
+    final maxPushUnits = _mmOf(3.0, scale);
+    if (bestD > maxPushUnits) return rings;
     if (pushX.abs() < 1e-9 && pushY.abs() < 1e-9) return rings;
 
     return [

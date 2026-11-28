@@ -426,6 +426,96 @@ class BasemapFetcher {
     return '${r.name}|${f[0]}|${f[1]}|${l[0]}|${l[1]}';
   }
 
+  /// 内置地名的 `kind` → [PlaceLevel]（v3.39）。
+  ///
+  /// ## 为什么必须映射
+  /// 旧实现把所有内置地名一律当成 [PlaceLevel.village] —— 这意味着
+  /// `city`（信阳 8 个县市）、`town`（190 个乡镇）、`suburb`（33 个片区）
+  /// 全部按村名级别排到最低优先级、最小字号，然后在注记避让里被路名
+  /// 挤掉。用户看到的正是"市县镇名也常常不出现"。
+  ///
+  /// 映射依据：行政级别优先，其余（学校/医院/商场等 POI）按"居民点"
+  /// 待遇处理，字号小、级别低，让位给行政地名。
+  static PlaceLevel _bundledPlaceLevel(String kind) {
+    switch (kind) {
+      case 'city':
+        return PlaceLevel.city;
+      case 'county':
+      case 'district':
+        return PlaceLevel.city;
+      case 'town':
+      case 'townhall':
+        return PlaceLevel.town;
+      case 'suburb':
+      case 'quarter':
+        return PlaceLevel.suburb;
+      case 'neighbourhood':
+        return PlaceLevel.neighbourhood;
+      case 'village':
+        return PlaceLevel.village;
+      case 'hamlet':
+        return PlaceLevel.hamlet;
+      case 'residential':
+        return PlaceLevel.residential;
+      default:
+        // 学校/医院/商场/加油站等设施名：并入居民点级别，
+        // 排在行政地名之后，不与村名争位置。
+        return PlaceLevel.residential;
+    }
+  }
+
+  /// 新路 [r] 是否与已收路网的某条**几何重合**（v3.39）。
+  ///
+  /// 判据：端点对端点最近距离 < 12m 且两段方向夹角 < 25°。
+  /// 双向都试（数据源的折线走向可能相反），命中即视为同一条路。
+  /// 12m 是实测出来的：OSM 与高德同名道路端点中位偏差 2.8m、
+  /// P90 10.1m；取 12m 能压住绝大多数重复，又不会误伤并行的辅路
+  /// （辅路与主路中心距一般 ≥ 8m，但**端点**几乎不会同时落在 12m 内
+  /// 且方向一致，方向判据把这类误判挡住）。
+  static bool _hasCoincident(
+    Map<String, List<RoadPoly>> near,
+    String Function(double lat, double lon) gk,
+    RoadPoly r,
+  ) {
+    final a0 = r.pts.first, a1 = r.pts.last;
+    final la0 = a0[0], lo0 = a0[1], la1 = a1[0], lo1 = a1[1];
+    final dx = lo1 - lo0, dy = la1 - la0;
+    final lenA = math.sqrt(dx * dx + dy * dy);
+    if (lenA < 1e-9) return false;
+
+    const tolDeg = 12.0 / 111320.0; // 12 米
+    final cj = (la0 * 500).floor(), ci = (lo0 * 500).floor();
+    for (var dj = -1; dj <= 1; dj++) {
+      for (var di = -1; di <= 1; di++) {
+        final bucket = near['${cj + dj}|${ci + di}'];
+        if (bucket == null) continue;
+        for (final o in bucket) {
+          if (o.pts.length < 2) continue;
+          final b0 = o.pts.first, b1 = o.pts.last;
+          // 端点匹配（两种走向都试）
+          final same = (b0[0] - la0).abs() < tolDeg &&
+                  (b0[1] - lo0).abs() < tolDeg &&
+                  (b1[0] - la1).abs() < tolDeg &&
+                  (b1[1] - lo1).abs() < tolDeg;
+          final rev = (b1[0] - la0).abs() < tolDeg &&
+              (b1[1] - lo0).abs() < tolDeg &&
+              (b0[0] - la1).abs() < tolDeg &&
+              (b0[1] - lo1).abs() < tolDeg;
+          if (!same && !rev) continue;
+          // 方向一致性
+          final ex = (rev ? b0[1] - b1[1] : b1[1] - b0[1]);
+          final ey = (rev ? b0[0] - b1[0] : b1[0] - b0[0]);
+          final lenB = math.sqrt(ex * ex + ey * ey);
+          if (lenB < 1e-9) continue;
+          final cos = (dx * ex + dy * ey) / (lenA * lenB);
+          if (cos < 0.906) continue; // 夹角 > 25°
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   /// 给数据来源打标记（`+内置`），并避免重复叠加同一个后缀。
   static String _srcTag(String base, String tag) =>
       base.contains(tag) ? base : '$base$tag';
@@ -889,9 +979,20 @@ class BasemapFetcher {
       const minRoads = 40; // 一张 A3 勘察图至少要这个量级的道路
       const minBuildings = 20;
       const minPlaces = 5;
-      final needRoads = roadsOut.length < minRoads;
-      final needBld = buildingsOut.length < minBuildings;
-      final needPlaces = placesOut.length < minPlaces;
+
+      // **图幅口径下必修（v3.39）**：Overpass 在国内只覆盖主路 + 部分小路，
+      // 而随包内置的是高德矢量瓦片全量路网（20.5 万条，含村道/小区内部路）。
+      // 旧逻辑只在"联网结果少于 40 条"时才补内置 —— 只要 Overpass 回了几十
+      // 上百条主路，内置那几千条小路就永远不进来，这正是用户反复反馈
+      // "道路太少/小路出不来"的根因。
+      //
+      // 图幅模式要的是"整幅图都有底图"，所以这里改为**始终并入内置**，
+      // 网络结果优先、内置只补缺（按路名+首末点去重）。走廊模式下仍走旧门槛
+      // （走廊只要贴着线路那几十条，补 7000 条反而画乱）。
+      final frameMode = bboxOverride != null;
+      final needRoads = frameMode || roadsOut.length < minRoads;
+      final needBld = frameMode || buildingsOut.length < minBuildings;
+      final needPlaces = frameMode || placesOut.length < minPlaces;
       if ((needRoads || needBld || needPlaces) &&
           BundledBasemap.covers(
               /* lonMin */ bbox[1],
@@ -908,13 +1009,41 @@ class BasemapFetcher {
               final seen = <String>{
                 for (final r in roadsOut) _roadKey(r),
               };
+              // **几何重合去重（v3.39）**
+              //
+              // [`_roadKey`] 是"路名+首末点精确坐标"，只能挡住同一份数据被
+              // 读两遍。而这里合并的是**两个数据源**（Overpass/OSM 与高德
+              // 矢量瓦片）：同一条路两边的节点位置本来就不一样（实测中位
+              // 偏差 2.8m），精确键永远不相等 → 同一条马路被画两遍，
+              // 双线各偏移几厘米，在 CAD 里放大就是"路是双影的"。
+              //
+              // 所以先按**端点邻近**建网格（0.002°≈200m 格），新路进来时
+              // 查附近 3×3 格里的已有路，端点距离 < 12m 且走向一致即判重合，
+              // 直接丢弃内置的那条（网络数据优先）。
+              final near = <String, List<RoadPoly>>{};
+              String gk(double lat, double lon) =>
+                  '${(lat * 500).floor()}|${(lon * 500).floor()}';
+              void register(RoadPoly r) {
+                if (r.pts.isEmpty) return;
+                for (final p in [r.pts.first, r.pts.last]) {
+                  (near[gk(p[0], p[1])] ??= <RoadPoly>[]).add(r);
+                }
+              }
+
+              for (final r in roadsOut) {
+                register(r);
+              }
               for (final r in br) {
                 final rp = RoadPoly(
                   r.pts,
                   OverpassClient.gradeOf(r.highway),
                   r.name,
                 );
-                if (seen.add(_roadKey(rp))) merged.add(rp);
+                if (rp.pts.length < 2) continue;
+                if (!seen.add(_roadKey(rp))) continue;
+                if (_hasCoincident(near, gk, rp)) continue;
+                merged.add(rp);
+                register(rp);
               }
               roadsOut = merged;
               roadsReport = DatasetReport(
@@ -954,7 +1083,7 @@ class BasemapFetcher {
                     name: p.name,
                     lat: p.lat,
                     lon: p.lon,
-                    level: PlaceLevel.village,
+                    level: _bundledPlaceLevel(p.kind),
                     isArea: false,
                   ));
                 }

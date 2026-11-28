@@ -57,5 +57,9 @@ flutter:
     # 现场没信号时仍能出图：Overpass/高德抓不到就用它。
     # 来源：上游 dujianhua200/ovimap v4.0.x 的 assets/buildings。
     - assets/buildings/xinyang.ovbld
+    # 路网分块二进制索引（v3.39）：旧 geo.json.gz 每次导出要解压+解析 173 万点，
+    # 索引版只解压命中网格。生成：python3 tool/build_road_index.py
+    - assets/buildings/xinyang_roads.ovrd
+    # 旧 GeoJSON 保留为索引不可用时的回退路径（换数据包但没重建索引时仍能出图）
     - assets/buildings/xinyang_roads.geojson.gz
     - assets/buildings/xinyang_places.geojson.gz

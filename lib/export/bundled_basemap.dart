@@ -31,6 +31,7 @@ import 'dart:typed_data' show Uint8List;
 import 'package:flutter/services.dart' show rootBundle;
 
 import 'building_index.dart';
+import 'road_index.dart';
 
 /// 数据覆盖范围（WGS84 经纬度）。
 ///
@@ -78,6 +79,14 @@ const String kBundledBuildingsAsset = 'assets/buildings/xinyang.geojson.gz';
 /// 由 `tool/build_index.py` 生成；缺失时自动回退 [kBundledBuildingsAsset]。
 const String kBundledBuildingsIndexAsset = 'assets/buildings/xinyang.ovbld';
 const String kBundledRoadsAsset = 'assets/buildings/xinyang_roads.geojson.gz';
+
+/// 路网**分块二进制索引**（v3.39）。
+///
+/// 与建筑同思路（见 [kBundledBuildingsIndexAsset]）：旧 GeoJSON 路径每次
+/// 导出都要 `gzip.decode(10.5MB)` + `jsonDecode` 20.5 万条道路 / 173 万点，
+/// 实测单次 3~6 秒；索引版只解压命中网格（A3 图幅约 1 块 / 9KB）。
+/// 由 `tool/build_road_index.py` 生成；缺失时自动回退 [kBundledRoadsAsset]。
+const String kBundledRoadsIndexAsset = 'assets/buildings/xinyang_roads.ovrd';
 const String kBundledPlacesAsset = 'assets/buildings/xinyang_places.geojson.gz';
 
 /// 一条内置道路（坐标已是 WGS84，`[lat, lon]` 与项目其余部分一致）。
@@ -87,11 +96,26 @@ class BundledRoad {
   final String highway;
   final double minLat, minLon, maxLat, maxLon;
 
+  /// 一次遍历算出外包框（v3.39）。
+  ///
+  /// 旧实现用 4 次 `pts.map().reduce()`，每个点被 4 个闭包各访问一遍。
+  /// 索引化之后单幅图仍有 7000 条路、2.5 万点，全市查询 16 万条 ——
+  /// 4 倍常数在导出链路上是白烧的 CPU。改成单循环后语义完全一致。
   BundledRoad(this.pts, this.name, this.highway)
-      : minLat = pts.map((p) => p[0]).reduce((a, b) => a < b ? a : b),
-        maxLat = pts.map((p) => p[0]).reduce((a, b) => a > b ? a : b),
-        minLon = pts.map((p) => p[1]).reduce((a, b) => a < b ? a : b),
-        maxLon = pts.map((p) => p[1]).reduce((a, b) => a > b ? a : b);
+      : minLat = _bound(pts, 0, true),
+        maxLat = _bound(pts, 0, false),
+        minLon = _bound(pts, 1, true),
+        maxLon = _bound(pts, 1, false);
+
+  static double _bound(List<List<double>> pts, int axis, bool isMin) {
+    if (pts.isEmpty) return 0.0;
+    var v = pts.first[axis];
+    for (var i = 1; i < pts.length; i++) {
+      final x = pts[i][axis];
+      if (isMin ? x < v : x > v) v = x;
+    }
+    return v;
+  }
 }
 
 /// 一个内置地名点。
@@ -159,6 +183,14 @@ class BundledBasemap {
 
   final List<BundledRoad> _roads = [];
   final List<BundledPlace> _places = [];
+
+  /// 路网分块索引（v3.39，优先路径）。非空时 `_roads` 始终为空 ——
+  /// 道路**不入内存**，查询时才从命中块里解出来。
+  RoadIndex? _roadIndex;
+
+  /// 路网 GeoJSON 的压缩字节（索引不可用时的回退路径）。
+  Uint8List? _roadsGzBytes;
+
   // 注：建筑**不在内存里存解析结果**（见 buildingsIn 的惰性解析说明），
   // 早先的 `_buildingRings` 字段已移除 —— 那 70 万条环正是内存暴涨的根源。
 
@@ -174,7 +206,8 @@ class BundledBasemap {
   static const double _bMinLon = 113.723, _bMaxLon = 115.932;
   static const double _bMinLat = 31.393, _bMaxLat = 32.664;
 
-  bool get roadsLoaded => _roads.isNotEmpty;
+  /// 路网是否可用（索引或回退字节任一在即可，不看是否已解析）。
+  bool get roadsLoaded => _roadIndex != null || _roads.isNotEmpty;
   bool get placesLoaded => _places.isNotEmpty;
   /// 建筑数据是否可用（只看字节在不在，不看解析结果）。
   bool get buildingsLoaded => _buildingIndex != null || _buildingsGzBytes != null;
@@ -201,25 +234,50 @@ class BundledBasemap {
 
   Future<void> _load() async {
     final sw = Stopwatch()..start();
+    // ---- 道路：优先分块索引（v3.39）----
+    //
+    // 旧路径（GeoJSON gzip）在**索引不可用时**才走，保持向后兼容：
+    // 换了数据包但没跑 tool/build_road_index.py 时仍然能出图，只是慢。
     try {
-      final txt = await _readGz(kBundledRoadsAsset);
-      for (final f in _features(txt)) {
-        final geom = f['geometry'];
-        if (geom is! Map) continue;
-        if (geom['type'] != 'LineString') continue;
-        final pts = _toLatLon(geom['coordinates']);
-        if (pts.length < 2) continue;
-        final props = _props(f);
-        final road = BundledRoad(
-          pts,
-          (props['name'] as String?) ?? '',
-          (props['highway'] as String?) ?? '',
-        );
-        _roads.add(road);
-        _extendRoadBox(road);
+      final raw = await rootBundle.load(kBundledRoadsIndexAsset);
+      final idx = RoadIndex.parse(raw.buffer.asUint8List());
+      if (idx != null) {
+        _roadIndex = idx;
+      } else {
+        loadErrors.add('路网索引格式不识别，回退 GeoJSON');
       }
-    } catch (e) {
-      loadErrors.add('道路：$e');
+    } catch (_) {
+      // 索引文件不存在 → 回退旧路径
+    }
+    if (_roadIndex == null) {
+      try {
+        final b = await rootBundle.load(kBundledRoadsAsset);
+        _roadsGzBytes = b.buffer.asUint8List();
+        final txt = utf8.decode(gzip.decode(_roadsGzBytes!));
+        for (final f in _features(txt)) {
+          final geom = f['geometry'];
+          if (geom is! Map) continue;
+          if (geom['type'] != 'LineString') continue;
+          final pts = _toLatLon(geom['coordinates']);
+          if (pts.length < 2) continue;
+          final props = _props(f);
+          final road = BundledRoad(
+            pts,
+            (props['name'] as String?) ?? '',
+            (props['highway'] as String?) ?? '',
+          );
+          _roads.add(road);
+          _extendRoadBox(road);
+        }
+      } catch (e) {
+        loadErrors.add('道路：$e');
+      }
+    } else {
+      // 索引路径：不预解析任何道路，只登记覆盖范围（导出时按 bbox 取块）。
+      _rMinLon = _roadIndex!.lonMin;
+      _rMaxLon = _roadIndex!.lonMax;
+      _rMinLat = _roadIndex!.latMin;
+      _rMaxLat = _roadIndex!.latMax;
     }
 
     try {
@@ -331,8 +389,24 @@ class BundledBasemap {
   // ---------------- 查询 ----------------
 
   /// 取 bbox 内的道路（与 bbox 相交即算）。
+  ///
+  /// ## 索引路径（v3.39）
+  /// 只解压命中的网格块。20.5 万条道路一次导出**只取图上要用的那几百条**，
+  /// 不再全量 jsonDecode（旧路径单次 3~6 秒，这是"导出近一分钟"的最大一项）。
   List<BundledRoad> roadsIn(
       double lonMin, double latMin, double lonMax, double latMax) {
+    final idx = _roadIndex;
+    if (idx != null) {
+      try {
+        // IndexedRoad 已经是 [lat, lon]，与 BundledRoad 一致，直接转。
+        return [
+          for (final r in idx.query(lonMin, latMin, lonMax, latMax))
+            BundledRoad(r.pts, r.name, r.highway)
+        ];
+      } catch (e) {
+        loadErrors.add('路网索引查询：$e');
+      }
+    }
     if (_roads.isEmpty) return const [];
     return _roads.where((r) {
       return !(r.maxLat < latMin ||
@@ -459,7 +533,11 @@ class BundledBasemap {
     final bldState = _buildingIndex != null
         ? '已就绪（惰性，分块索引）'
         : (_buildingsGzBytes != null ? '已就绪（惰性，按范围过滤）' : '未加载');
-    return '道路 ${_roads.length} 条（${box(_rMinLat, _rMaxLat, _rMinLon, _rMaxLon)}）\n'
+    // 道路：走分块索引时报告"索引"（v3.39），回退 GeoJSON 时报条数
+    final roadState = _roadIndex != null
+        ? '已就绪（惰性，分块索引，${_roadIndex!.nameCount} 个路名）'
+        : '${_roads.length} 条';
+    return '道路 $roadState（${box(_rMinLat, _rMaxLat, _rMinLon, _rMaxLon)}）\n'
         '地名 ${_places.length} 个（${box(_pMinLat, _pMaxLat, _pMinLon, _pMaxLon)}）\n'
         '建筑 $bldState'
         '（${box(_bMinLat, _bMaxLat, _bMinLon, _bMaxLon)}）\n'

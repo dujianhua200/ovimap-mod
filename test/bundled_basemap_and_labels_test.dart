@@ -29,6 +29,8 @@ void main() {
       final root = Directory.current;
       for (final name in const [
         'xinyang.ovbld',
+        // v3.39：道路改分块索引（.ovrd），GeoJSON 保留为回退路径
+        'xinyang_roads.ovrd',
         'xinyang_roads.geojson.gz',
         'xinyang_places.geojson.gz',
       ]) {
