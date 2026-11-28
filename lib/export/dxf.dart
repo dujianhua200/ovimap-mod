@@ -92,17 +92,40 @@ class _BandGrid {
     return out;
   }
 
-  /// 取该格子里的候选（每项 [bandIdx, segIdx]）。
-  List<List<int>> near(double x, double y) =>
-      _cells[_key((x / cell).floor(), (y / cell).floor())] ??
-      const <List<int>>[];
+  /// 取包围盒覆盖的所有格子的候选（按 [bandIdx, segIdx] 去重）。
+  ///
+  /// 路口修剪按"边线段 → 可能挡住它的路面段"查询，用包围盒比用中心格
+  /// 安全：一条长边线段会跨很多格，只看一格会漏掉大半遮挡。
+  List<List<int>> nearBox(
+      double minX, double minY, double maxX, double maxY) {
+    final gx0 = (minX / cell).floor(), gx1 = (maxX / cell).floor();
+    final gy0 = (minY / cell).floor(), gy1 = (maxY / cell).floor();
+    final out = <List<int>>[];
+    final seen = <int>{};
+    for (var gx = gx0; gx <= gx1; gx++) {
+      for (var gy = gy0; gy <= gy1; gy++) {
+        final hit = _cells[_key(gx, gy)];
+        if (hit == null) continue;
+        for (final c in hit) {
+          final k = c[0] * 1048573 + c[1];
+          if (seen.add(k)) out.add(c);
+        }
+      }
+    }
+    return out;
+  }
 }
 
 /// 路口修剪上下文：全部路面胶囊带 + 它们的方格索引。
 class _RoadTrim {
   final List<_RoadBand> bands;
   final _BandGrid grid;
-  const _RoadTrim(this.bands, this.grid);
+
+  /// 全部路面里最大的半宽（图纸单位）。粗筛时把边线段包围盒外扩这么多，
+  /// 保证不会漏掉"看起来离得远、其实半宽很大"的路面。
+  final double maxHalf;
+
+  const _RoadTrim(this.bands, this.grid, this.maxHalf);
 }
 
 
@@ -1371,26 +1394,6 @@ class DxfExporter {
   // 数值上等于纸面毫米），半宽也是毫米，距离直接可比。
   // ══════════════════════════════════════════════════════════════════
 
-  /// 点到线段最近点（用于"采样点是否落在别的路面内"的距离判定）。
-  static List<double> _segClosest(double px, double py, double ax, double ay,
-      double bx, double by) {
-    final dx = bx - ax, dy = by - ay;
-    final l2 = dx * dx + dy * dy;
-    if (l2 < 1e-12) return [ax, ay];
-    var t = ((px - ax) * dx + (py - ay) * dy) / l2;
-    if (t < 0) t = 0;
-    if (t > 1) t = 1;
-    return [ax + dx * t, ay + dy * t];
-  }
-
-  /// 点到线段的最短距离（图纸单位）。
-  static double _distToSeg(double px, double py, double ax, double ay,
-      double bx, double by) {
-    final q = _segClosest(px, py, ax, ay, bx, by);
-    final dx = px - q[0], dy = py - q[1];
-    return math.sqrt(dx * dx + dy * dy);
-  }
-
   /// 各顶点的斜接偏移量（扁平 [dx0,dy0,dx1,dy1,...]，已乘 [off]）。
   static List<double> _miterOffsets(List<List<double>> pts, double off,
       double miterLimit) {
@@ -1444,38 +1447,130 @@ class DxfExporter {
     ];
   }
 
-  /// 采样点是否落在**其它**道路的路面内（[selfIdx] 排除本路）。
+  /// 线段 AB 上"落在 CD 胶囊（半径 [r]）内"的参数区间集合。
   ///
-  /// 判据是点到线段距离 < 该路半宽的 0.95 倍：略微收缩，让线头往路口里缩进
-  /// 一点点，CAD 里放大看不会露出"半根线头"。
-  static bool _coveredByOtherRoad(double x, double y, _RoadTrim trim,
-      int selfIdx) {
-    for (final c in trim.grid.near(x, y)) {
-      final bi = c[0];
-      if (trim.bands[bi].idx == selfIdx) continue;
-      final band = trim.bands[bi];
-      if (band.halfW <= 1e-6) continue;
-      final si = c[1];
-      final a = band.pts[si], b = band.pts[si + 1];
-      if (_distToSeg(x, y, a[0], a[1], b[0], b[1]) < band.halfW * 0.95) {
-        return true;
+  /// 解析求解，不采样。胶囊 = 线段 CD 外扩 [r] 的圆角矩形，判定拆成三段：
+  ///   · 轴向投影落在 [0, |CD|] 内 → 到无限直线的法向距离 |b| < r（线性约束）
+  ///   · 投影在 C 之外           → |P - C| < r（二次不等式）
+  ///   · 投影在 D 之外           → |P - D| < r（二次不等式）
+  /// 每段都化成 t 上的区间，最后可能得到 1~3 个区间。
+  ///
+  /// 为什么必须解析：旧实现按 0.7 图纸单位重采样再逐点查格子，A3 单幅
+  /// （3107 条路 / 13598 段）就要算 72 万个点、市区大框（11069 条路）
+  /// 要算 294 万个点 —— CI 实测把门禁跑到 18 分钟超时被取消。
+  static List<List<double>> _capsuleInterval(
+      double ax, double ay, double bx, double by,
+      double cx, double cy, double dx, double dy, double r) {
+    final out = <List<double>>[];
+    final wx = bx - ax, wy = by - ay;
+    final vx = ax - cx, vy = ay - cy;
+    final ex = dx - cx, ey = dy - cy;
+    final el2 = ex * ex + ey * ey;
+
+    void push(double lo, double hi) {
+      if (lo < 0) lo = 0;
+      if (hi > 1) hi = 1;
+      if (hi - lo > 1e-9) out.add(<double>[lo, hi]);
+    }
+
+    // 退化：CD 长度为 0 → 以 C 为圆心、r 为半径的圆。
+    if (el2 < 1e-18) {
+      final qa = wx * wx + wy * wy;
+      if (qa < 1e-18) return out;
+      final qb = 2 * (vx * wx + vy * wy);
+      final qc = vx * vx + vy * vy - r * r;
+      final disc = qb * qb - 4 * qa * qc;
+      if (disc <= 0) return out;
+      final sq = math.sqrt(disc);
+      push((-qb - sq) / (2 * qa), (-qb + sq) / (2 * qa));
+      return out;
+    }
+
+    final el = math.sqrt(el2);
+    final ux = ex / el, uy = ey / el; // 轴向
+    final nx = -uy, ny = ux; // 法向
+    // a(t) = a0 + aw*t（轴向投影），b(t) = b0 + bw*t（法向距离，带符号）
+    final a0 = vx * ux + vy * uy, aw = wx * ux + wy * uy;
+    final b0 = vx * nx + vy * ny, bw = wx * nx + wy * ny;
+
+    // —— 分支一：0 <= a(t) <= el 且 |b(t)| < r ——
+    var lo = 0.0, hi = 1.0;
+    var empty = false;
+    void clipGe(double c0, double cw) {
+      // 解 c0 + cw*t >= 0
+      if (cw.abs() < 1e-18) {
+        if (c0 < 0) empty = true;
+        return;
+      }
+      final t = -c0 / cw;
+      if (cw > 0) {
+        if (t > lo) lo = t;
+      } else {
+        if (t < hi) hi = t;
       }
     }
-    return false;
+
+    clipGe(a0, aw); // a >= 0
+    clipGe(el - a0, -aw); // a <= el
+    clipGe(r - b0, -bw); // b <= r
+    clipGe(b0 + r, bw); // b >= -r
+    if (!empty && hi - lo > 1e-9) push(lo, hi);
+
+    // —— 分支二/三：投影在端点外，用圆心约束 ——
+    void circleRange(double px, double py, bool beforeStart) {
+      final qa = wx * wx + wy * wy;
+      if (qa < 1e-18) return;
+      final dvx = ax - px, dvy = ay - py;
+      final qb = 2 * (dvx * wx + dvy * wy);
+      final qc = dvx * dvx + dvy * dvy - r * r;
+      final disc = qb * qb - 4 * qa * qc;
+      if (disc <= 0) return;
+      final sq = math.sqrt(disc);
+      var slo = (-qb - sq) / (2 * qa);
+      var shi = (-qb + sq) / (2 * qa);
+      // 只保留该分支有效的轴向侧
+      var blo = 0.0, bhi = 1.0;
+      var bempty = false;
+      void clipGe2(double c0, double cw) {
+        if (cw.abs() < 1e-18) {
+          if (c0 < 0) bempty = true;
+          return;
+        }
+        final t = -c0 / cw;
+        if (cw > 0) {
+          if (t > blo) blo = t;
+        } else {
+          if (t < bhi) bhi = t;
+        }
+      }
+
+      if (beforeStart) {
+        clipGe2(-a0, -aw); // a <= 0
+      } else {
+        clipGe2(a0 - el, aw); // a >= el
+      }
+      if (bempty) return;
+      if (blo > slo) slo = blo;
+      if (bhi < shi) shi = bhi;
+      push(slo, shi);
+    }
+
+    circleRange(cx, cy, true);
+    circleRange(dx, dy, false);
+    return out;
   }
 
-  /// 把一条边线按"落在其它路面内"的区间切开，返回若干段**未遮挡**的折线。
+  /// 把一条边线按"落在其它道路路面内"的区间切开，返回若干段**未遮挡**折线。
   ///
   /// 这是"交叉口衔接处多余的没修剪掉"的修复：旧实现每条路各自画两条偏移线，
   /// 从不与相邻道路求交，于是每个路口都有四条边线互相穿过去，图上是井字形的
-  /// 多余线段。改成先重采样、把被别家路面盖住的点丢掉，剩下的连续点连成段。
+  /// 多余线段。现在先解出"被别家路面盖住"的 t 区间，再取补集切段。
   ///
-  /// 采样步长取 `max(0.7, halfW * 1.5)` 图纸单位（≈纸面毫米）：比最小线宽
-  /// （0.15mm）大一个量级，切点误差远小于 CAD 出图可见误差。
+  /// 性能：每个边线段先用外扩包围盒查方格，候选通常 0~5 段；无候选就直接整段
+  /// 保留（城市里绝大多数路段属于这种），只有真正靠路口的那几段才做解析求交。
   static List<List<List<double>>> _clipRoadEdge(
       List<List<double>> line, _RoadTrim trim, int selfIdx, double halfW) {
     if (line.length < 2) return const <List<List<double>>>[];
-    final step = math.max(0.7, halfW * 1.5);
     final segs = <List<List<double>>>[];
     var keep = <List<double>>[];
 
@@ -1486,27 +1581,75 @@ class DxfExporter {
 
     for (var i = 1; i < line.length; i++) {
       final a = line[i - 1], b = line[i];
-      final dx = b[0] - a[0], dy = b[1] - a[1];
-      final len = math.sqrt(dx * dx + dy * dy);
-      if (len < 1e-9) continue;
-      final k = math.max(1, (len / step).ceil());
-      if (i == 1) {
-        if (!_coveredByOtherRoad(a[0], a[1], trim, selfIdx)) keep.add(a);
+      if ((a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12) {
+        continue;
       }
-      for (var j = 1; j <= k; j++) {
-        final t = j / k;
-        final px = a[0] + dx * t, py = a[1] + dy * t;
-        if (_coveredByOtherRoad(px, py, trim, selfIdx)) {
-          flush();
-        } else {
-          keep.add(<double>[px, py]);
+      // 粗筛：边线段包围盒外扩"其它路面最大半宽"，取候选路面段
+      final cands = trim.grid.nearBox(
+          math.min(a[0], b[0]) - trim.maxHalf,
+          math.min(a[1], b[1]) - trim.maxHalf,
+          math.max(a[0], b[0]) + trim.maxHalf,
+          math.max(a[1], b[1]) + trim.maxHalf);
+
+      final blocked = <List<double>>[];
+      for (final c in cands) {
+        final band = trim.bands[c[0]];
+        if (band.idx == selfIdx) continue;
+        final r = band.halfW * 0.95;
+        if (r <= 1e-9) continue;
+        final q0 = band.pts[c[1]], q1 = band.pts[c[1] + 1];
+        // 逐段包围盒再排除一次（nearBox 只按边线段整体包围盒筛过）
+        if (math.min(q0[0], q1[0]) - r > math.max(a[0], b[0])) continue;
+        if (math.max(q0[0], q1[0]) + r < math.min(a[0], b[0])) continue;
+        if (math.min(q0[1], q1[1]) - r > math.max(a[1], b[1])) continue;
+        if (math.max(q0[1], q1[1]) + r < math.min(a[1], b[1])) continue;
+        blocked.addAll(_capsuleInterval(
+            a[0], a[1], b[0], b[1], q0[0], q0[1], q1[0], q1[1], r));
+      }
+
+      if (blocked.isEmpty) {
+        if (keep.isEmpty) keep.add(a);
+        keep.add(b);
+        continue;
+      }
+
+      blocked.sort((x, y) => x[0].compareTo(y[0]));
+      void emit(double t0, double t1) {
+        if (t1 - t0 < 1e-9) return;
+        final p0 = <double>[
+          a[0] + (b[0] - a[0]) * t0,
+          a[1] + (b[1] - a[1]) * t0
+        ];
+        final p1 = <double>[
+          a[0] + (b[0] - a[0]) * t1,
+          a[1] + (b[1] - a[1]) * t1
+        ];
+        if (keep.isNotEmpty) {
+          final last = keep.last;
+          if ((last[0] - p0[0]).abs() > 1e-9 ||
+              (last[1] - p0[1]).abs() > 1e-9) {
+            flush();
+          }
         }
+        keep.add(p0);
+        keep.add(p1);
+      }
+
+      var cursor = 0.0;
+      for (final iv in blocked) {
+        if (iv[0] > cursor) emit(cursor, iv[0]);
+        if (iv[1] > cursor) cursor = iv[1];
+        if (cursor >= 1.0 - 1e-9) break;
+      }
+      if (cursor < 1.0 - 1e-9) {
+        emit(cursor, 1.0);
+      } else {
+        flush();
       }
     }
     flush();
     return segs;
   }
-
 
   /// 把所有道路收成"路面胶囊带 + 方格索引"，供路口修剪查询。
   ///
@@ -1547,7 +1690,7 @@ class DxfExporter {
     for (var bi = 0; bi < bands.length; bi++) {
       grid.addBand(bi, bands[bi].pts, bands[bi].halfW);
     }
-    return _RoadTrim(bands, grid);
+    return _RoadTrim(bands, grid, maxHalf);
   }
 
 
